@@ -45,6 +45,8 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      AZURE_AI_API_BASE: ${AZURE_AI_API_BASE}
+      AZURE_AI_API_KEY: ${AZURE_AI_API_KEY}
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     ports:
       - "${LITELLM_PORT}:4000"
