@@ -21,9 +21,30 @@ type MemoryTable struct {
 	byModel map[string][]ModelPrice
 }
 
-func NewMemoryTable(prices []ModelPrice) *MemoryTable {
+// validateTierOrder 确保 ModelPrice 的档位按 MaxInputTokens 升序排列，
+// 无上限档位（MaxInputTokens=0）必须是最后一档。这是 SelectTier 的前置条件。
+func validateTierOrder(p ModelPrice) error {
+	if len(p.Tiers) == 0 {
+		return nil // 空档位列表是有效的（虽然后续调用会报错）
+	}
+	for i := 1; i < len(p.Tiers); i++ {
+		prev, cur := p.Tiers[i-1], p.Tiers[i]
+		if prev.MaxInputTokens == 0 {
+			return fmt.Errorf("%s/%s: 无上限档位（MaxInputTokens=0）必须是最后一档", p.Provider, p.Model)
+		}
+		if cur.MaxInputTokens != 0 && cur.MaxInputTokens <= prev.MaxInputTokens {
+			return fmt.Errorf("%s/%s: 价格档位必须按 MaxInputTokens 严格升序排列", p.Provider, p.Model)
+		}
+	}
+	return nil
+}
+
+func NewMemoryTable(prices []ModelPrice) (*MemoryTable, error) {
 	byModel := make(map[string][]ModelPrice)
 	for _, p := range prices {
+		if err := validateTierOrder(p); err != nil {
+			return nil, err
+		}
 		k := modelKey(p.Provider, p.Model)
 		byModel[k] = append(byModel[k], p)
 	}
@@ -34,7 +55,7 @@ func NewMemoryTable(prices []ModelPrice) *MemoryTable {
 		})
 		byModel[k] = versions
 	}
-	return &MemoryTable{byModel: byModel}
+	return &MemoryTable{byModel: byModel}, nil
 }
 
 // Lookup 返回 at 时刻生效的价格，即 EffectiveFrom <= at 中最晚的那条。
