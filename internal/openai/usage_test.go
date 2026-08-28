@@ -109,4 +109,18 @@ func TestIsUsageOnlyChunk(t *testing.T) {
 
 	contentWithUsage := []byte(`{"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":10}}`)
 	require.False(t, IsUsageOnlyChunk(contentWithUsage), "带内容的块不算 usage-only")
+
+	// 实测 gpt-5.6-luna（Azure AI Foundry）不会把 choices 留空，
+	// 而是塞一个 delta 为空对象、无 finish_reason 的占位 choice。
+	azureStyleUsageOnly := []byte(`{"choices":[{"index":0,"delta":{}}],"usage":{"prompt_tokens":9,"completion_tokens":40}}`)
+	require.True(t, IsUsageOnlyChunk(azureStyleUsageOnly), "占位 choice（空 delta、无 finish_reason）也算 usage-only")
+
+	finishReasonChunk := []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+	require.False(t, IsUsageOnlyChunk(finishReasonChunk), "带 finish_reason 的块不算 usage-only（无 usage 也不算）")
+
+	usageWithFinishReason := []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9}}`)
+	require.False(t, IsUsageOnlyChunk(usageWithFinishReason), "finish_reason 块即便带 usage 也不算 usage-only")
+
+	nullUsageChunk := []byte(`{"choices":[],"usage":null}`)
+	require.False(t, IsUsageOnlyChunk(nullUsageChunk), "usage 显式为 null 不算 usage-only")
 }

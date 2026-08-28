@@ -96,13 +96,46 @@ func HasUsage(payload []byte) bool {
 // IsUsageOnlyChunk 判断这是否是只携带 usage、不含任何内容的块。
 // 请求中带 stream_options.include_usage=true 时，上游会在末尾多发这样一块。
 // 若该选项是 Edge 自行注入的，这一块需要在转发给客户端前剥掉。
+//
+// 不能只看 choices 是否为空数组——实测部分 OpenAI 兼容实现（例如某些
+// Azure AI Foundry 部署）会在这一块里塞一个 delta 为空对象、且没有
+// finish_reason 的占位 choice，而不是把 choices 留空。这块依然不含任何
+// 客户端关心的内容，所以也要算作 usage-only，否则注入的 usage 就会泄漏给客户端。
 func IsUsageOnlyChunk(payload []byte) bool {
 	var probe struct {
-		Choices []json.RawMessage `json:"choices"`
-		Usage   json.RawMessage   `json:"usage"`
+		Choices []struct {
+			Delta        json.RawMessage `json:"delta"`
+			FinishReason *string         `json:"finish_reason"`
+		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(payload, &probe); err != nil {
 		return false
 	}
-	return len(probe.Choices) == 0 && len(probe.Usage) > 0
+	trimmedUsage := bytes.TrimSpace(probe.Usage)
+	if len(trimmedUsage) == 0 || bytes.Equal(trimmedUsage, jsonNull) {
+		return false
+	}
+	for _, c := range probe.Choices {
+		if c.FinishReason != nil {
+			return false
+		}
+		if !isEmptyJSONObject(c.Delta) {
+			return false
+		}
+	}
+	return true
+}
+
+// isEmptyJSONObject 判断一段 JSON 是否是空对象（{}）或缺省值。
+func isEmptyJSONObject(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, jsonNull) {
+		return true
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &m); err != nil {
+		return false
+	}
+	return len(m) == 0
 }
