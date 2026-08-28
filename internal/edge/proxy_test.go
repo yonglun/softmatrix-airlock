@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -185,6 +186,24 @@ func TestProxyRecordsZeroCostWhenPriceMissing(t *testing.T) {
 	require.Len(t, records, 1)
 	require.Equal(t, pricing.Micro(0), records[0].CostMicro)
 	require.Equal(t, "price_not_found", records[0].ErrorType)
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
+
+func TestProxyRecordsUsageOnBodyReadFailure(t *testing.T) {
+	w := &recordingWriter{}
+	p := NewProxy("http://unused", testTable(), w)
+	req := withKey(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", errReader{}), testKey())
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	records := w.get()
+	require.Len(t, records, 1, "body 读取失败也必须留下一条用量/审计记录")
+	require.Equal(t, http.StatusBadRequest, records[0].StatusCode)
+	require.Equal(t, "read_request_body_failed", records[0].ErrorType)
 }
 
 func TestProxyFailsWithoutKeyInContext(t *testing.T) {

@@ -49,12 +49,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := uuid.NewString()
 	w.Header().Set("X-Airlock-Request-Id", requestID)
 
-	reqBody, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAuthError(w, http.StatusBadRequest, "invalid_request", "读取请求体失败")
-		return
-	}
-
 	rec := usage.Record{
 		RequestID: requestID,
 		Timestamp: time.Now(),
@@ -62,7 +56,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		UserID:    key.UserID,
 		KeyID:     key.ID,
 		Provider:  upstreamProvider,
-		Stream:    isStreamRequest(reqBody),
 	}
 
 	start := time.Now()
@@ -70,6 +63,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.LatencyMS = int(time.Since(start).Milliseconds())
 		p.usage.Write(rec)
 	}()
+
+	reqBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		rec.StatusCode = http.StatusBadRequest
+		rec.ErrorType = "read_request_body_failed"
+		writeAuthError(w, http.StatusBadRequest, "invalid_request", "读取请求体失败")
+		return
+	}
+	rec.Stream = isStreamRequest(reqBody)
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method,
 		p.upstreamBaseURL+r.URL.Path, bytes.NewReader(reqBody))
