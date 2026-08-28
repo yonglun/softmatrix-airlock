@@ -1,8 +1,10 @@
 package edge
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -123,7 +125,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outcome := pipeStream(w, resp.Body, stripUsageChunk, start)
 		rec.TTFTMS = int(outcome.ttft.Milliseconds())
 		rec.Model = outcome.model
-		if outcome.usage == nil {
+
+		if outcome.scanErr != nil {
+			errType, msg := "stream_read_failed", "读取上游流失败"
+			if errors.Is(outcome.scanErr, bufio.ErrTooLong) {
+				errType, msg = "sse_line_too_long", "SSE 单帧超过缓冲区上限"
+			}
+			// 即使 usage 已经拿到了也要记警告：连接终归是非正常结束的，
+			// 运维得知道这次"看似成功"的请求其实断过线。
+			slog.Warn(msg, "request_id", requestID, "err", outcome.scanErr,
+				"usage_captured", outcome.usage != nil)
+			if outcome.usage == nil {
+				rec.ErrorType = errType
+				return
+			}
+		} else if outcome.usage == nil {
+			// 流干净结束（EOF），只是上游这次没带 usage。
 			rec.ErrorType = "usage_missing"
 			return
 		}

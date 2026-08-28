@@ -91,6 +91,15 @@ func TestIsDone(t *testing.T) {
 	require.False(t, IsDone([]byte(`{"a":1}`)))
 }
 
+func TestHasUsage(t *testing.T) {
+	require.True(t, HasUsage([]byte(`{"choices":[],"usage":{"prompt_tokens":10}}`)))
+	require.False(t, HasUsage([]byte(`{"choices":[{"delta":{"content":"hi"}}]}`)),
+		"没有 usage 字段")
+	require.False(t, HasUsage([]byte(`{"choices":[{"delta":{"content":"hi"}}],"usage":null}`)),
+		"usage 显式为 null 等同于没带——很多兼容实现在中间帧里就是这么写的")
+	require.False(t, HasUsage([]byte(`{not json`)))
+}
+
 func TestIsUsageOnlyChunk(t *testing.T) {
 	usageOnly := []byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
 	require.True(t, IsUsageOnlyChunk(usageOnly))

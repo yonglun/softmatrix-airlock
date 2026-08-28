@@ -20,6 +20,9 @@ type streamOutcome struct {
 	usage *openai.Usage
 	model string
 	ttft  time.Duration
+	// scanErr 是 scanner.Err()：流干净结束（EOF）时为 nil，
+	// 网络中断或单帧超过 sseScanBufferMax（bufio.ErrTooLong）时非 nil。
+	scanErr error
 }
 
 // ensureIncludeUsage 保证请求带上 stream_options.include_usage=true，
@@ -84,13 +87,18 @@ func pipeStream(w http.ResponseWriter, body io.Reader, stripUsageChunk bool, sta
 			continue
 		}
 
-		if openai.IsUsageOnlyChunk(payload) {
-			if u, model, err := openai.ExtractUsage(payload); err == nil {
+		// 每一块都可能带 usage——不能只看 IsUsageOnlyChunk 判定的那些块。
+		// 非 OpenAI 标准的上游可能把 usage 和内容塞进同一块（choices 非空）。
+		if u, model, err := openai.ExtractUsage(payload); err == nil {
+			if outcome.usage == nil && openai.HasUsage(payload) {
 				outcome.usage = &u
-				if model != "" {
-					outcome.model = model
-				}
 			}
+			if outcome.model == "" && model != "" {
+				outcome.model = model
+			}
+		}
+
+		if openai.IsUsageOnlyChunk(payload) {
 			if stripUsageChunk {
 				continue // 这是 Edge 自己要来的，不下发
 			}
@@ -98,19 +106,15 @@ func pipeStream(w http.ResponseWriter, body io.Reader, stripUsageChunk bool, sta
 			continue
 		}
 
-		// 内容块：记录首字延迟与模型名
+		// 内容块：记录首字延迟
 		if !ttftSet {
 			outcome.ttft = time.Since(start)
 			ttftSet = true
 		}
-		if outcome.model == "" {
-			if _, model, err := openai.ExtractUsage(payload); err == nil && model != "" {
-				outcome.model = model
-			}
-		}
 		writeLine(w, flusher, line)
 	}
 
+	outcome.scanErr = scanner.Err()
 	return outcome
 }
 

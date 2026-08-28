@@ -77,6 +77,22 @@ func IsDone(payload []byte) bool {
 	return bytes.Equal(payload, doneMark)
 }
 
+var jsonNull = []byte("null")
+
+// HasUsage 判断这块 SSE 负载是否携带非空的 usage 字段，
+// 不要求 choices 为空——某些非 OpenAI 标准实现会把 usage 和内容塞进同一块。
+// "usage":null 视为没带：不少兼容实现会在中间帧里显式写 null，只在末帧填真实值。
+func HasUsage(payload []byte) bool {
+	var probe struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return false
+	}
+	trimmed := bytes.TrimSpace(probe.Usage)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, jsonNull)
+}
+
 // IsUsageOnlyChunk 判断这是否是只携带 usage、不含任何内容的块。
 // 请求中带 stream_options.include_usage=true 时，上游会在末尾多发这样一块。
 // 若该选项是 Edge 自行注入的，这一块需要在转发给客户端前剥掉。
