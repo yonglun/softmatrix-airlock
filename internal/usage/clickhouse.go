@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -22,6 +23,16 @@ func NewClickHouseSink(dsn string) (*ClickHouseSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("连接 ClickHouse 失败: %w", err)
 	}
+
+	// clickhouse.Open 本身是懒连接，不会真的拨号——用 Ping 在启动阶段
+	// 就暴露 DSN 错误或网络不通，避免用量批次悄悄写失败到很久之后才在
+	// 日志里发现，此前所有批次的计费数据已经静默丢失。
+	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Ping(pingCtx); err != nil {
+		return nil, fmt.Errorf("ClickHouse 健康检查失败: %w", err)
+	}
+
 	return &ClickHouseSink{conn: conn}, nil
 }
 
