@@ -1,6 +1,7 @@
 package cryptobox
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -52,7 +53,14 @@ func TestDecryptRejectsTamperedCiphertext(t *testing.T) {
 	enc, err := c.Encrypt("secret")
 	require.NoError(t, err)
 
-	tampered := "A" + enc[1:]
+	// 直接对解码后的字节翻转最后一位（落在 GCM 认证 tag 内），保证语义上
+	// 一定发生了篡改。之前用 "A" + enc[1:] 覆盖首字符，当原始首字节的高 6 位
+	// 恰好已经是 0（概率 1/64）时会是一次空操作，导致测试偶发失败。
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	require.NoError(t, err)
+	raw[len(raw)-1] ^= 0xFF
+	tampered := base64.StdEncoding.EncodeToString(raw)
+
 	_, err = c.Decrypt(tampered)
 	require.Error(t, err)
 }
