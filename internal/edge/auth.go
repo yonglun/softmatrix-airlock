@@ -39,15 +39,18 @@ func Authenticate(store apikey.Store) func(http.Handler) http.Handler {
 			plain := strings.TrimSpace(strings.TrimPrefix(raw, bearerPrefix))
 
 			// 先做廉价的格式校验，挡掉明显非法的输入，避免无谓查库。
+			// 这里与下方"密钥不存在"分支使用完全相同的 message 文案：
+			// 二者的 code/status 本就相同（防止客户端区分「格式错」与「查无此密钥」两种失败原因），
+			// 文案不一致会让攻击者仍可通过消息文本探测出具体原因，因此必须保持逐字节一致。
 			if err := apikey.ValidateFormat(plain); err != nil {
-				writeAuthError(w, http.StatusUnauthorized, "invalid_api_key", "密钥格式非法")
+				writeAuthError(w, http.StatusUnauthorized, "invalid_api_key", "密钥格式非法或不存在")
 				return
 			}
 
 			key, err := store.ByHash(r.Context(), apikey.Hash(plain))
 			if err != nil {
 				if errors.Is(err, apikey.ErrKeyNotFound) {
-					writeAuthError(w, http.StatusUnauthorized, "invalid_api_key", "密钥不存在")
+					writeAuthError(w, http.StatusUnauthorized, "invalid_api_key", "密钥格式非法或不存在")
 					return
 				}
 				writeAuthError(w, http.StatusInternalServerError, "internal_error", "校验密钥时发生内部错误")
