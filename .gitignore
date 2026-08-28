@@ -4,5 +4,8 @@ node_modules/
 .env.*
 dist/
 build/
+bin/
 *.log
 .DS_Store
+coverage.out
+/streambuffer
