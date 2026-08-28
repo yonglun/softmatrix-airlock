@@ -73,8 +73,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.Stream = isStreamRequest(reqBody)
 
+	// 流式请求需要注入 include_usage，否则上游不会回传 usage。
+	forwardBody := reqBody
+	stripUsageChunk := false
+	if rec.Stream {
+		injectedBody, injected, err := ensureIncludeUsage(reqBody)
+		if err != nil {
+			rec.StatusCode = http.StatusBadRequest
+			rec.ErrorType = "invalid_request_body"
+			writeAuthError(w, http.StatusBadRequest, "invalid_request", "请求体不是合法 JSON")
+			return
+		}
+		forwardBody = injectedBody
+		stripUsageChunk = injected
+	}
+
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method,
-		p.upstreamBaseURL+r.URL.Path, bytes.NewReader(reqBody))
+		p.upstreamBaseURL+r.URL.Path, bytes.NewReader(forwardBody))
 	if err != nil {
 		rec.StatusCode = http.StatusInternalServerError
 		rec.ErrorType = "build_request_failed"
@@ -83,6 +98,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	copyRequestHeaders(upstreamReq.Header, r.Header)
 	upstreamReq.Header.Set("Authorization", "Bearer "+key.UpstreamKey)
+	upstreamReq.ContentLength = int64(len(forwardBody))
 
 	resp, err := p.client.Do(upstreamReq)
 	if err != nil {
@@ -97,6 +113,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
+	if resp.StatusCode != http.StatusOK {
+		rec.ErrorType = "upstream_error"
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+
+	if rec.Stream {
+		outcome := pipeStream(w, resp.Body, stripUsageChunk, start)
+		rec.TTFTMS = int(outcome.ttft.Milliseconds())
+		rec.Model = outcome.model
+		if outcome.usage == nil {
+			rec.ErrorType = "usage_missing"
+			return
+		}
+		rec.Usage = toPricingUsage(*outcome.usage)
+		rec.CostMicro = p.cost(&rec)
+		return
+	}
+
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		rec.ErrorType = "read_response_failed"
@@ -104,11 +139,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := w.Write(respBody); err != nil {
 		slog.Warn("向客户端写响应失败", "request_id", requestID, "err", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		rec.ErrorType = "upstream_error"
-		return
 	}
 
 	protoUsage, model, err := openai.ExtractUsage(respBody)
