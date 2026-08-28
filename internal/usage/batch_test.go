@@ -115,3 +115,24 @@ func (s blockingSink) InsertBatch(_ context.Context, _ []Record) error {
 	<-s.release
 	return nil
 }
+
+func TestConcurrentWriteAndCloseDoesNotPanic(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		sink := &memSink{}
+		w := NewBatchWriter(sink, 10, time.Hour)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				w.Write(rec("x"))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			_ = w.Close()
+		}()
+		require.NotPanics(t, wg.Wait)
+	}
+}

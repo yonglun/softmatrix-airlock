@@ -24,8 +24,12 @@ type BatchWriter struct {
 
 	dropped atomic.Int64
 
+	// mu 保证 Write 的「检查已关闭 + 发送」与 Close 的「标记已关闭 + 关闭 channel」
+	// 不会交错——Write 全程持有读锁，Close 必须拿到写锁才能关闭 channel，
+	// 因此 Close 关闭 channel 时，不可能还有正在发送中的 Write 落在检查和发送之间的窗口里。
+	mu        sync.RWMutex
+	closed    bool
 	closeOnce sync.Once
-	closed    atomic.Bool
 	done      chan struct{}
 }
 
@@ -43,7 +47,9 @@ func NewBatchWriter(sink Sink, batchSize int, flushInterval time.Duration) *Batc
 
 // Write 是非阻塞的。队列满或已关闭时丢弃记录并计数。
 func (w *BatchWriter) Write(r Record) {
-	if w.closed.Load() {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.closed {
 		w.dropped.Add(1)
 		return
 	}
@@ -62,8 +68,10 @@ func (w *BatchWriter) Dropped() int64 {
 // Close 停止接收新记录，把队列中剩余的刷出去后返回。
 func (w *BatchWriter) Close() error {
 	w.closeOnce.Do(func() {
-		w.closed.Store(true)
+		w.mu.Lock()
+		w.closed = true
 		close(w.queue)
+		w.mu.Unlock()
 		<-w.done
 	})
 	return nil
