@@ -1,0 +1,113 @@
+// Package control 实现 Airlock 管理面：OIDC 登录、组织树、成员与离职对账。
+// 本包不 import internal/edge——管理面与数据面在代码层面完全隔离。
+package control
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+const (
+	UserStatusActive   = "active"
+	UserStatusDisabled = "disabled"
+)
+
+// User 是 Airlock 侧的用户。身份凭证由 IdP 持有，
+// 这里只镜像展示所需的最小画像 + Airlock 自己的归属与状态。
+type User struct {
+	ID              string
+	ExternalID      string // OIDC sub
+	Email           string
+	DisplayName     string
+	Status          string
+	IsPlatformAdmin bool
+	PrimaryOrgID    *string
+	LastLoginAt     *time.Time
+	ReconciledAt    *time.Time
+}
+
+// Session 是一次登录会话。ID 是 token 的 sha256，不是 token 本身。
+type Session struct {
+	ID         string
+	UserID     string
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
+	IP         string
+	UserAgent  string
+}
+
+// LoginState 承载授权码流程中 /login 与 /callback 之间的一次性状态。
+type LoginState struct {
+	ID           string
+	State        string
+	PKCEVerifier string
+	RedirectTo   string
+	ExpiresAt    time.Time
+}
+
+// Org 是组织树上的一个节点。Path 由 ID 拼成（形如 /root/child/leaf），
+// 因此改名不影响 Path。
+type Org struct {
+	ID             string
+	ParentID       *string
+	Name           string
+	Path           string
+	ExternalSource *string
+	ExternalID     *string
+}
+
+// Identity 是从 IdP 换回来的身份信息。
+type Identity struct {
+	Subject     string
+	Email       string
+	DisplayName string
+}
+
+var (
+	ErrUserNotFound       = errors.New("用户不存在")
+	ErrSessionNotFound    = errors.New("会话不存在或已过期")
+	ErrLoginStateNotFound = errors.New("登录状态不存在或已过期")
+	ErrOrgNotFound        = errors.New("组织节点不存在")
+	ErrOrgHasChildren     = errors.New("组织节点下还有子节点")
+	ErrOrgHasKeys         = errors.New("组织节点下还有密钥")
+	ErrOrgCycle           = errors.New("不能把节点移动到自己的子树下")
+)
+
+type UserStore interface {
+	ByID(ctx context.Context, id string) (*User, error)
+	ByExternalID(ctx context.Context, externalID string) (*User, error)
+	Upsert(ctx context.Context, u *User) (*User, error)
+	ListActive(ctx context.Context) ([]*User, error)
+	MarkDisabled(ctx context.Context, userIDs []string) error
+	CountPlatformAdmins(ctx context.Context) (int, error)
+	SetPlatformAdmin(ctx context.Context, userID string, v bool) error
+}
+
+type SessionStore interface {
+	Create(ctx context.Context, s Session) error
+	Get(ctx context.Context, id string) (*Session, error)
+	Touch(ctx context.Context, id string, at time.Time) error
+	Delete(ctx context.Context, id string) error
+	DeleteByUser(ctx context.Context, userID string) (int64, error)
+	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
+}
+
+type LoginStateStore interface {
+	Create(ctx context.Context, ls LoginState) error
+	// Take 取出并立即删除——登录状态是一次性的，重放必须失败。
+	Take(ctx context.Context, id string) (*LoginState, error)
+	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
+}
+
+type OrgStore interface {
+	Create(ctx context.Context, o *Org) error
+	Get(ctx context.Context, id string) (*Org, error)
+	Rename(ctx context.Context, id, name string) error
+	Move(ctx context.Context, id string, newParentID *string) error
+	Delete(ctx context.Context, id string) error
+	Children(ctx context.Context, parentID *string) ([]*Org, error)
+	Subtree(ctx context.Context, id string) ([]*Org, error)
+	ByExternal(ctx context.Context, source, externalID string) (*Org, error)
+	All(ctx context.Context) ([]*Org, error)
+}
