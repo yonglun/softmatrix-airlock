@@ -1,11 +1,11 @@
-// Command edge 是 Airlock 的内联网关进程。
-package main
+// Package app 装配 Airlock 各个进程角色。
+// 每个角色一个文件，彼此不互相 import。
+package app
 
 import (
 	"context"
 	"database/sql"
 	"errors"
-	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,17 +23,8 @@ import (
 	"github.com/softmatrix/airlock/migrations"
 )
 
-func main() {
-	migrateOnly := flag.Bool("migrate-only", false, "只执行数据库迁移后退出")
-	flag.Parse()
-
-	if err := run(*migrateOnly); err != nil {
-		slog.Error("edge 启动失败", "err", err)
-		os.Exit(1)
-	}
-}
-
-func run(migrateOnly bool) error {
+// RunEdge 启动数据面进程。
+func RunEdge() error {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		return err
@@ -47,10 +38,6 @@ func run(migrateOnly bool) error {
 
 	if err := migrations.Up(db); err != nil {
 		return err
-	}
-	if migrateOnly {
-		slog.Info("迁移完成")
-		return nil
 	}
 
 	sink, err := usage.NewClickHouseSink(cfg.ClickHouseDSN)

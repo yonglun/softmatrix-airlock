@@ -4,7 +4,7 @@ test:
 	go test ./... -race -count=1
 
 build:
-	go build -o bin/edge ./cmd/edge
+	go build -o bin/airlock ./cmd/airlock
 
 lint:
 	go vet ./...
@@ -16,4 +16,4 @@ down:
 	docker compose -f deploy/docker-compose.yml down
 
 migrate:
-	go run ./cmd/edge -migrate-only
+	go run ./cmd/airlock migrate
