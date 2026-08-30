@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -300,4 +301,88 @@ func TestOrgStoreMoveDoesNotTouchSiblings(t *testing.T) {
 	ab, err := s.Get(ctx, "ab")
 	require.NoError(t, err)
 	require.Equal(t, "/root/ab", ab.Path, "同前缀的兄弟节点不该被误改")
+}
+
+// seedKeyForOrg 往 api_keys 插一行，用于验证删除保护。
+// 需要先有 users 行，因为 P1.2a 给 api_keys.user_id 加了外键。
+func seedKeyForOrg(t *testing.T, db *sql.DB, orgID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	users := NewPostgresUserStore(db)
+	u, err := users.Upsert(ctx, &User{
+		ExternalID: "key-owner-" + orgID, Email: "owner@x.com", Status: UserStatusActive,
+	})
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO api_keys (id, key_hash, key_prefix, org_id, user_id, upstream_key_enc)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		"k-"+orgID, "hash-"+orgID, "ak-xxxx", orgID, u.ID, "enc")
+	require.NoError(t, err)
+}
+
+func TestOrgStoreDeleteLeaf(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "root", "集团", nil)
+	mkOrg(t, s, "leaf", "叶子", strp("root"))
+
+	require.NoError(t, s.Delete(ctx, "leaf"))
+
+	_, err := s.Get(ctx, "leaf")
+	require.ErrorIs(t, err, ErrOrgNotFound)
+}
+
+func TestOrgStoreDeleteRejectsNodeWithChildren(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "root", "集团", nil)
+	mkOrg(t, s, "child", "子节点", strp("root"))
+
+	require.ErrorIs(t, s.Delete(ctx, "root"), ErrOrgHasChildren)
+
+	_, err := s.Get(ctx, "root")
+	require.NoError(t, err, "拒绝删除后节点必须还在")
+}
+
+func TestOrgStoreDeleteRejectsNodeWithKeys(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "org1", "研发", nil)
+	seedKeyForOrg(t, db, "org1")
+
+	require.ErrorIs(t, s.Delete(ctx, "org1"), ErrOrgHasKeys)
+}
+
+func TestOrgStoreDeleteRejectsNodeWithRevokedKeys(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "org1", "研发", nil)
+	seedKeyForOrg(t, db, "org1")
+	_, err := db.ExecContext(ctx, `UPDATE api_keys SET status = 'revoked' WHERE org_id = 'org1'`)
+	require.NoError(t, err)
+
+	require.ErrorIs(t, s.Delete(ctx, "org1"), ErrOrgHasKeys,
+		"已吊销的 Key 仍然承载历史账单归属，不能因为吊销就允许删组织")
+}
+
+func TestOrgStoreDeleteUnknown(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+
+	require.ErrorIs(t, s.Delete(context.Background(), "nope"), ErrOrgNotFound)
 }

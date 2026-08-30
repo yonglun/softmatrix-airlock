@@ -217,7 +217,37 @@ func (s *postgresOrgStore) Move(ctx context.Context, id string, newParentID *str
 	return nil
 }
 
-// Delete 在 Task 15 实现。
+// Delete 删除一个组织节点，但拒绝删除还有子节点或还有密钥的节点。
+//
+// 为什么只查 api_keys 而不查 ClickHouse 的用量记录：用量记录一定挂在某把
+// Key 上，而 Key 只会被吊销、永不物理删除——所以「有用量记录」必然蕴含
+// 「有 Key」。查 api_keys 已经覆盖，控制面因此完全不需要 ClickHouse 连接。
 func (s *postgresOrgStore) Delete(ctx context.Context, id string) error {
-	return errors.New("Delete 尚未实现")
+	if _, err := s.Get(ctx, id); err != nil {
+		return err
+	}
+
+	var childCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM organizations WHERE parent_id = $1`, id).Scan(&childCount); err != nil {
+		return fmt.Errorf("检查子节点失败: %w", err)
+	}
+	if childCount > 0 {
+		return ErrOrgHasChildren
+	}
+
+	var keyCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM api_keys WHERE org_id = $1`, id).Scan(&keyCount); err != nil {
+		return fmt.Errorf("检查关联密钥失败: %w", err)
+	}
+	if keyCount > 0 {
+		return ErrOrgHasKeys
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM organizations WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("删除组织节点失败: %w", err)
+	}
+	return nil
 }
