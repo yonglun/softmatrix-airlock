@@ -53,6 +53,35 @@ services:
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
 
+  casdoor:
+    image: casbin/casdoor:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      driverName: postgres
+      dataSourceName: "user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} host=postgres port=5432 sslmode=disable dbname=casdoor"
+      tableNamePrefix: casdoor_
+      origin: http://localhost:8000
+    ports:
+      - "8000:8000"
+
+  openldap:
+    # bitnami/openldap:2.6 已从 docker.io/bitnami 命名空间下架（Bitnami 2025 年把
+    # 非付费镜像迁到了 bitnamilegacy），换成 bitnamilegacy/openldap:2.6——
+    # 同一个镜像、同一套环境变量接口，只是仓库路径变了。
+    image: bitnamilegacy/openldap:2.6
+    environment:
+      LDAP_ROOT: dc=example,dc=org
+      LDAP_ADMIN_USERNAME: admin
+      LDAP_ADMIN_PASSWORD: adminpass
+      LDAP_CUSTOM_LDIF_DIR: /ldifs
+    ports:
+      - "1389:1389"
+    volumes:
+      - ./openldap:/ldifs:ro
+
 volumes:
   pgdata:
   chdata:

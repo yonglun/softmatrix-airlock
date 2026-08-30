@@ -1,0 +1,17 @@
+dn: dc=example,dc=org
+objectClass: dcObject
+objectClass: organization
+o: Example Org
+dc: example
+
+dn: ou=rd,dc=example,dc=org
+objectClass: organizationalUnit
+ou: 研发中心
+
+dn: ou=plat,ou=rd,dc=example,dc=org
+objectClass: organizationalUnit
+ou: 平台产品部
+
+dn: ou=gw,ou=plat,ou=rd,dc=example,dc=org
+objectClass: organizationalUnit
+ou: 网关组

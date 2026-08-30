@@ -4,10 +4,16 @@ test:
 	go test ./... -race -count=1
 
 build:
-	go build -o bin/edge ./cmd/edge
+	go build -o bin/airlock ./cmd/airlock
 
 lint:
 	go vet ./...
+	@echo "检查管理面与数据面的包边界..."
+	@! go list -deps ./internal/control/... 2>/dev/null | grep -q 'airlock/internal/edge' \
+		|| { echo "违规：internal/control 依赖了 internal/edge"; exit 1; }
+	@! go list -deps ./internal/edge/... 2>/dev/null | grep -q 'airlock/internal/control' \
+		|| { echo "违规：internal/edge 依赖了 internal/control"; exit 1; }
+	@echo "包边界检查通过"
 
 up:
 	docker compose --env-file .env -f deploy/docker-compose.yml up -d
@@ -16,4 +22,4 @@ down:
 	docker compose -f deploy/docker-compose.yml down
 
 migrate:
-	go run ./cmd/edge -migrate-only
+	go run ./cmd/airlock migrate
