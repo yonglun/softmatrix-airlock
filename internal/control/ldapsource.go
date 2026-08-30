@@ -93,11 +93,25 @@ func (s *LDAPSource) FetchOrgTree(ctx context.Context) ([]ExternalOrgNode, error
 }
 
 // parentDN 去掉 DN 的第一段，得到父节点 DN。
+//
+// 用状态机逐字符扫描，而不是裸 strings.Index(dn, ",")：DN 的属性值里
+// 可能包含转义逗号（如某个部门名字就叫 "Sales, EMEA"，DN 写作
+// ou=Sales\, EMEA,dc=example,dc=org），裸切分会把转义逗号当成分隔符，
+// 切出一个根本不存在的父 DN，导致该节点静默丢父（被误判成根节点）
+// 或者更糟——巧合匹配到无关节点，挂错父子关系。
+// 反斜杠转义的规则很简单：反斜杠总是转义紧跟着的那一个字符
+// （不管是逗号、反斜杠本身，还是十六进制转义 \XX 里的第一位十六进制数），
+// 被转义的字符不可能是分隔符，跳过它即可，不需要完整解析 DN 语法。
+//
 // 例：ou=gw,ou=plat,dc=example,dc=org → ou=plat,dc=example,dc=org
 func parentDN(dn string) string {
-	i := strings.Index(dn, ",")
-	if i < 0 {
-		return ""
+	for i := 0; i < len(dn); i++ {
+		switch dn[i] {
+		case '\\':
+			i++ // 跳过被转义的字符，它不可能是真正的分隔符
+		case ',':
+			return strings.TrimSpace(dn[i+1:])
+		}
 	}
-	return strings.TrimSpace(dn[i+1:])
+	return ""
 }
