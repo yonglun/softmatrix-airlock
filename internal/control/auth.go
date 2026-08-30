@@ -222,8 +222,13 @@ func (a *Auth) RequireSession(next http.Handler) http.Handler {
 }
 
 // sanitizeRedirect 只接受站内绝对路径，防开放重定向。
-// "//evil.com" 这种协议相对 URL 也要挡掉。
+//
+// "//evil.com" 这种协议相对 URL 要挡掉；"/\evil.com" 同样要挡——
+// 浏览器解析 http/https 这类"特殊 scheme"的相对引用时，把反斜杠当正斜杠
+// 处理（WHATWG URL 标准行为），所以只查 "//" 前缀会被反斜杠绕过。
+// 先把反斜杠归一化成正斜杠，再统一走同一套前缀检查，两种写法都堵。
 func sanitizeRedirect(v string) string {
+	v = strings.ReplaceAll(v, "\\", "/")
 	if v == "" || !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") {
 		return "/"
 	}

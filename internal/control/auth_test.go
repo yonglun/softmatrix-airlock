@@ -551,3 +551,20 @@ func TestLoginRedirectToRejectsProtocolRelativeURL(t *testing.T) {
 			"协议相对 URL（// 开头）同样是开放重定向，必须被拦截为默认的 /")
 	}
 }
+
+func TestLoginRedirectToRejectsBackslashVariant(t *testing.T) {
+	// 浏览器解析 http/https 相对引用时把反斜杠当正斜杠处理，
+	// 所以 "/\evil.example.com" 会被解析成跳到 evil.example.com——
+	// 只查 "//" 前缀挡不住这个变体，是开放重定向过滤器最经典的绕过手法之一。
+	a, _, _, states, _ := newTestAuth(t)
+
+	rec := httptest.NewRecorder()
+	a.HandleLogin(rec, httptest.NewRequest(http.MethodGet,
+		`/auth/login?redirect_to=/\evil.example.com/steal`, nil))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	for _, ls := range states.data {
+		require.Equal(t, "/", ls.RedirectTo,
+			"反斜杠变体的协议相对 URL 同样是开放重定向，必须被拦截为默认的 /")
+	}
+}
