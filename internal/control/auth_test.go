@@ -533,3 +533,21 @@ func TestLoginRedirectToIsSanitized(t *testing.T) {
 		require.NotContains(t, ls.RedirectTo, "evil.example.com")
 	}
 }
+
+func TestLoginRedirectToRejectsProtocolRelativeURL(t *testing.T) {
+	// "https://evil.example.com/steal" 走的是 sanitizeRedirect 里
+	// "不以 / 开头" 这条分支；"//evil.example.com" 本身是以 / 开头的，
+	// 必须靠单独的 "//" 前缀检查才能拦住——这是开放重定向里最容易漏掉的一种，
+	// 用独立的测试锁定，不能只靠上面那条覆盖。
+	a, _, _, states, _ := newTestAuth(t)
+
+	rec := httptest.NewRecorder()
+	a.HandleLogin(rec, httptest.NewRequest(http.MethodGet,
+		"/auth/login?redirect_to=//evil.example.com/steal", nil))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	for _, ls := range states.data {
+		require.Equal(t, "/", ls.RedirectTo,
+			"协议相对 URL（// 开头）同样是开放重定向，必须被拦截为默认的 /")
+	}
+}
