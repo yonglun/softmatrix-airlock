@@ -8,6 +8,12 @@ build:
 
 lint:
 	go vet ./...
+	@echo "检查管理面与数据面的包边界..."
+	@! go list -deps ./internal/control/... 2>/dev/null | grep -q 'airlock/internal/edge' \
+		|| { echo "违规：internal/control 依赖了 internal/edge"; exit 1; }
+	@! go list -deps ./internal/edge/... 2>/dev/null | grep -q 'airlock/internal/control' \
+		|| { echo "违规：internal/edge 依赖了 internal/control"; exit 1; }
+	@echo "包边界检查通过"
 
 up:
 	docker compose --env-file .env -f deploy/docker-compose.yml up -d
