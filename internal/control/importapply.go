@@ -122,7 +122,8 @@ func sortAddedByDepth(items []DiffItem) []DiffItem {
 			progressed = true
 		}
 		if !progressed {
-			// 批内存在环或悬空父节点，把剩下的原样附加，交给 Create 报错
+			// 批内存在环，把剩下的原样附加；主循环里对应项的父节点
+			// 查不到 extToID，会走 store.ByExternal 兜底查询，查不到就报错中止
 			for _, it := range added {
 				if !placed[it.ExternalID] {
 					out = append(out, it)
