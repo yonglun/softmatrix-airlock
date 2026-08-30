@@ -196,3 +196,108 @@ func TestOrgStoreManualNodesIgnoreExternalUnique(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, all, 2)
 }
+
+func TestOrgStoreMoveUpdatesSelfAndDescendantPaths(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	//   root
+	//   ├── a
+	//   │   └── x
+	//   │       └── y
+	//   └── b
+	mkOrg(t, s, "root", "集团", nil)
+	mkOrg(t, s, "a", "A", strp("root"))
+	mkOrg(t, s, "b", "B", strp("root"))
+	mkOrg(t, s, "x", "X", strp("a"))
+	mkOrg(t, s, "y", "Y", strp("x"))
+
+	// 把 x（连同 y）从 a 移到 b 下
+	require.NoError(t, s.Move(ctx, "x", strp("b")))
+
+	x, err := s.Get(ctx, "x")
+	require.NoError(t, err)
+	require.Equal(t, "/root/b/x", x.Path)
+	require.Equal(t, "b", *x.ParentID)
+
+	y, err := s.Get(ctx, "y")
+	require.NoError(t, err)
+	require.Equal(t, "/root/b/x/y", y.Path, "后代的 path 必须跟着一起改")
+}
+
+func TestOrgStoreMoveToRoot(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "root", "集团", nil)
+	mkOrg(t, s, "a", "A", strp("root"))
+	mkOrg(t, s, "x", "X", strp("a"))
+
+	require.NoError(t, s.Move(ctx, "a", nil))
+
+	a, err := s.Get(ctx, "a")
+	require.NoError(t, err)
+	require.Equal(t, "/a", a.Path)
+	require.Nil(t, a.ParentID)
+
+	x, err := s.Get(ctx, "x")
+	require.NoError(t, err)
+	require.Equal(t, "/a/x", x.Path)
+}
+
+func TestOrgStoreMoveRejectsIntoOwnSubtree(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "root", "集团", nil)
+	mkOrg(t, s, "a", "A", strp("root"))
+	mkOrg(t, s, "x", "X", strp("a"))
+
+	require.ErrorIs(t, s.Move(ctx, "a", strp("x")), ErrOrgCycle,
+		"把父节点移到自己的后代下会形成环")
+}
+
+func TestOrgStoreMoveRejectsOntoItself(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "root", "集团", nil)
+	mkOrg(t, s, "a", "A", strp("root"))
+
+	require.ErrorIs(t, s.Move(ctx, "a", strp("a")), ErrOrgCycle)
+}
+
+func TestOrgStoreMoveUnknownNode(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+
+	require.ErrorIs(t, s.Move(context.Background(), "nope", nil), ErrOrgNotFound)
+}
+
+func TestOrgStoreMoveDoesNotTouchSiblings(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	mkOrg(t, s, "root", "集团", nil)
+	mkOrg(t, s, "a", "A", strp("root"))
+	mkOrg(t, s, "b", "B", strp("root"))
+	// ab 与 a 同前缀，移动 a 时不能被误改
+	mkOrg(t, s, "ab", "AB", strp("root"))
+
+	require.NoError(t, s.Move(ctx, "a", strp("b")))
+
+	ab, err := s.Get(ctx, "ab")
+	require.NoError(t, err)
+	require.Equal(t, "/root/ab", ab.Path, "同前缀的兄弟节点不该被误改")
+}

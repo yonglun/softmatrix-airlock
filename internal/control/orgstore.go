@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -154,9 +155,66 @@ func collectOrgs(rows *sql.Rows) ([]*Org, error) {
 	return out, rows.Err()
 }
 
-// Move 在 Task 14 实现。
+// Move 把节点连同整棵子树挂到新父节点下，并重算所有受影响节点的 path。
+// 整个过程在一个事务里完成——路径改到一半失败会让组织树彻底错乱。
 func (s *postgresOrgStore) Move(ctx context.Context, id string, newParentID *string) error {
-	return errors.New("Move 尚未实现")
+	node, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	newPath := "/" + id
+	if newParentID != nil {
+		if *newParentID == id {
+			return ErrOrgCycle
+		}
+		parent, err := s.Get(ctx, *newParentID)
+		if err != nil {
+			return fmt.Errorf("目标父节点不可用: %w", err)
+		}
+		// 目标父节点若落在自己的子树内，移动后会形成环。
+		// 判据：父节点的 path 以本节点 path + "/" 开头（加分隔符避免同前缀误判）。
+		if parent.Path == node.Path || strings.HasPrefix(parent.Path, node.Path+"/") {
+			return ErrOrgCycle
+		}
+		newPath = parent.Path + "/" + id
+	}
+
+	if newPath == node.Path {
+		return nil // 没挪窝，什么都不用做
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().UTC()
+
+	// 先改后代：把旧 path 前缀整体替换成新前缀。
+	// 用 old + '/' 作为匹配前缀，避免误伤同前缀的兄弟节点。
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE organizations
+		SET path = $1 || substring(path from $2::int), updated_at = $3
+		WHERE path LIKE $4`,
+		newPath, len(node.Path)+1, now, node.Path+"/%"); err != nil {
+		return fmt.Errorf("重算后代路径失败: %w", err)
+	}
+
+	// 再改节点自己
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE organizations
+		SET parent_id = $1, path = $2, updated_at = $3
+		WHERE id = $4`,
+		newParentID, newPath, now, id); err != nil {
+		return fmt.Errorf("更新节点父子关系失败: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交移动事务失败: %w", err)
+	}
+	return nil
 }
 
 // Delete 在 Task 15 实现。
