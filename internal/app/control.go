@@ -83,12 +83,29 @@ func RunControl() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// 对账循环（Task 22）会用到这个可取消 context；
-	// 这里先保留 stopReconciler 以便退出时统一收口，
-	// 但 spec 给的实现从未消费 WithCancel 返回的 context 本身，
-	// 会被 go vet 判定为未使用变量，因此用 _ 丢弃（详见任务报告中的偏差说明）。
-	_, stopReconciler := context.WithCancel(ctx)
+	// 对账循环（Task 22）用这个可取消 context；收到退出信号时调用
+	// stopReconciler（见下方 select 的 <-stop 分支），runCtx 随之取消，
+	// reconciler.Run 的循环观察到 ctx.Done() 后退出。
+	runCtx, stopReconciler := context.WithCancel(ctx)
 	defer stopReconciler()
+
+	if os.Getenv("LDAP_URL") != "" {
+		reconciler := control.NewReconciler(control.ReconcilerDeps{
+			Users:    users,
+			Sessions: sessions,
+			Identity: control.NewLDAPIdentitySource(control.LDAPConfig{
+				URL:      os.Getenv("LDAP_URL"),
+				BindDN:   os.Getenv("LDAP_BIND_DN"),
+				BindPass: os.Getenv("LDAP_BIND_PASSWORD"),
+				BaseDN:   os.Getenv("LDAP_BASE_DN"),
+			}),
+			Keys: control.NewPostgresKeyRevoker(db),
+		})
+		go reconciler.Run(runCtx, cfg.ReconcileInterval)
+		slog.Info("离职对账已启用", "interval", cfg.ReconcileInterval)
+	} else {
+		slog.Warn("未配置 LDAP_URL，离职对账未启用")
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
