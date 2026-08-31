@@ -9,22 +9,29 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/softmatrix/airlock/internal/authz"
 )
 
 func newTestServer(t *testing.T) (*Server, *fakeUserStore, *fakeSessionStore) {
 	t.Helper()
 	users := newFakeUserStore()
 	sessions := newFakeSessionStore()
+	rbac := newFakeRBACStore()
 
 	auth := NewAuth(AuthDeps{
 		Users:       users,
 		Sessions:    sessions,
+		RBAC:        rbac,
 		LoginStates: newFakeLoginStateStore(),
 		OIDC:        &fakeOIDC{identity: &Identity{Subject: "s1", Email: "a@x.com"}},
 	})
+	resolver := authz.NewResolver(rbac)
 	srv := NewServer(ServerDeps{
-		Auth:   auth,
-		OrgAPI: NewOrgAPI(newFakeOrgStore(), &fakeSource{}),
+		Auth:     auth,
+		OrgAPI:   NewOrgAPI(newFakeOrgStore(), &fakeSource{}, resolver),
+		GrantAPI: NewGrantAPI(users, rbac, resolver),
+		Resolver: resolver,
 	})
 	return srv, users, sessions
 }
@@ -71,7 +78,14 @@ func TestServerOrgAPIRequiresSession(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-func TestServerOrgAPIAllowsAuthenticated(t *testing.T) {
+func TestServerOrgAPIListWithoutPermissionIsEmptyNot403(t *testing.T) {
+	// GET /api/orgs 是列表接口：登录不等于有权限——这正是 P1.2b 要建立的边界——
+	// 但没有可见范围时，正确行为是 200 + 空列表，而不是 403。
+	// 中间件曾经因为 TargetFiltered() 恒返回 nil target、被判定为
+	// 「无目标节点的节点级权限要求全局授予」而把每个非全局授予的用户
+	// 全部拦在 403，这是活的端到端验收（Task 21）才抓到的真实 bug——
+	// HandleList 自己的过滤逻辑（含空结果返回 []，见 orgapi_test.go 的
+	// TestListIsEmptyWithoutAnyReadAccess）从未被真正跑到过。
 	srv, users, sessions := newTestServer(t)
 	c := loggedIn(t, users, sessions)
 
@@ -81,9 +95,10 @@ func TestServerOrgAPIAllowsAuthenticated(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, "[]", rec.Body.String())
 }
 
-func TestServerOrgCreateRoute(t *testing.T) {
+func TestServerOrgCreateDeniedWithoutPermission(t *testing.T) {
 	srv, users, sessions := newTestServer(t)
 	c := loggedIn(t, users, sessions)
 
@@ -92,7 +107,7 @@ func TestServerOrgCreateRoute(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusCreated, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestServerWhoamiReturnsCurrentUser(t *testing.T) {

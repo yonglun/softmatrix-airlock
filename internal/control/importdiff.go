@@ -57,7 +57,9 @@ func ComputeDiff(remote []ExternalOrgNode, local []*Org, source string) []DiffIt
 	}
 
 	seen := make(map[string]bool, len(remote))
-	var items []DiffItem
+	// 用空切片而不是 nil：nil slice 会被 encoding/json 编码成 null，
+	// 而「无差异」是这个接口最常见的稳态返回，前端遍历 null 会直接抛异常。
+	items := []DiffItem{}
 
 	for _, rn := range remote {
 		seen[rn.ExternalID] = true

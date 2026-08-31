@@ -14,6 +14,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/softmatrix/airlock/internal/authz"
 	"github.com/softmatrix/airlock/internal/config"
 	"github.com/softmatrix/airlock/internal/control"
 	"github.com/softmatrix/airlock/migrations"
@@ -41,10 +42,22 @@ func RunControl() error {
 	loginStates := control.NewPostgresLoginStateStore(db)
 	orgs := control.NewPostgresOrgStore(db)
 
+	ctx := context.Background()
+	rbac := control.NewPostgresRBACStore(db)
+
+	// 内置角色与权限集以 Go 注册表为准，每次启动整体同步一次。
+	// 放在 CheckBootstrapConfig 之前——后者要数 platform_admin 授予，
+	// 依赖角色行已经存在。
+	if err := rbac.SyncBuiltinRoles(ctx); err != nil {
+		return err
+	}
+	if err := rbac.ValidatePermissions(ctx); err != nil {
+		return err
+	}
+
 	// 没有任何管理员且没配 bootstrap 时拒绝启动——
 	// 不允许出现「谁都能登、登进去就是管理员」的窗口期。
-	ctx := context.Background()
-	if err := control.CheckBootstrapConfig(ctx, users, cfg.BootstrapAdmin); err != nil {
+	if err := control.CheckBootstrapConfig(ctx, rbac, cfg.BootstrapAdmin); err != nil {
 		return err
 	}
 
@@ -63,6 +76,7 @@ func RunControl() error {
 		Sessions:       sessions,
 		LoginStates:    loginStates,
 		OIDC:           oidcClient,
+		RBAC:           rbac,
 		BootstrapAdmin: cfg.BootstrapAdmin,
 		SecureCookie:   strings.HasPrefix(cfg.OIDCRedirectURL, "https://"),
 	})
@@ -74,11 +88,15 @@ func RunControl() error {
 		BaseDN:   os.Getenv("LDAP_BASE_DN"),
 	})
 
+	resolver := authz.NewResolver(rbac)
+
 	srv := &http.Server{
 		Addr: cfg.ControlListenAddr,
 		Handler: control.NewServer(control.ServerDeps{
-			Auth:   auth,
-			OrgAPI: control.NewOrgAPI(orgs, ldapSource),
+			Auth:     auth,
+			OrgAPI:   control.NewOrgAPI(orgs, ldapSource, resolver),
+			GrantAPI: control.NewGrantAPI(users, rbac, resolver),
+			Resolver: resolver,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

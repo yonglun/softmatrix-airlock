@@ -386,3 +386,40 @@ func TestOrgStoreDeleteUnknown(t *testing.T) {
 
 	require.ErrorIs(t, s.Delete(context.Background(), "nope"), ErrOrgNotFound)
 }
+
+func TestOrgStoreDeleteRejectsNodeWithPrimaryOrgUsers(t *testing.T) {
+	// 复审第 4 条：users.primary_org_id 是 ON DELETE RESTRICT 外键。
+	// 不在应用层先数一遍，删除会在数据库层炸出驱动错误，
+	// 被 writeOrgError 的 default 分支映射成 500，而不是有意义的 409。
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	users := NewPostgresUserStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, s.Create(ctx, &Org{ID: "rd", Name: "研发中心"}))
+	u, err := users.Upsert(ctx, &User{ExternalID: "u1", Email: "u1@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, strp("rd")))
+
+	require.ErrorIs(t, s.Delete(ctx, "rd"), ErrOrgHasUsers)
+
+	_, err = s.Get(ctx, "rd")
+	require.NoError(t, err, "拒绝删除后节点必须还在")
+}
+
+func TestOrgStoreDeleteSucceedsAfterUnassigningUsers(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	users := NewPostgresUserStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, s.Create(ctx, &Org{ID: "rd", Name: "研发中心"}))
+	u, err := users.Upsert(ctx, &User{ExternalID: "u1", Email: "u1@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, strp("rd")))
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, nil))
+
+	require.NoError(t, s.Delete(ctx, "rd"))
+}

@@ -19,12 +19,12 @@ func NewPostgresUserStore(db *sql.DB) UserStore {
 }
 
 const userColumns = `id, external_id, email, display_name, status,
-	is_platform_admin, primary_org_id, last_login_at, reconciled_at`
+	primary_org_id, last_login_at, reconciled_at`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	err := row.Scan(&u.ID, &u.ExternalID, &u.Email, &u.DisplayName, &u.Status,
-		&u.IsPlatformAdmin, &u.PrimaryOrgID, &u.LastLoginAt, &u.ReconciledAt)
+		&u.PrimaryOrgID, &u.LastLoginAt, &u.ReconciledAt)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (s *postgresUserStore) ByExternalID(ctx context.Context, externalID string)
 
 // Upsert 按 external_id 插入或更新。
 // 只刷新 IdP 侧权威的画像字段（email/display_name）与 last_login_at；
-// is_platform_admin、primary_org_id、status 是 Airlock 自己管理的，不被登录覆盖。
+// primary_org_id、status 是 Airlock 自己管理的，不被登录覆盖。
 func (s *postgresUserStore) Upsert(ctx context.Context, u *User) (*User, error) {
 	id := u.ID
 	if id == "" {
@@ -123,22 +123,13 @@ func (s *postgresUserStore) MarkDisabled(ctx context.Context, userIDs []string) 
 	return nil
 }
 
-func (s *postgresUserStore) CountPlatformAdmins(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM users WHERE is_platform_admin = true AND status = $1`,
-		UserStatusActive).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("统计平台管理员失败: %w", err)
-	}
-	return n, nil
-}
-
-func (s *postgresUserStore) SetPlatformAdmin(ctx context.Context, userID string, v bool) error {
+// AssignPrimaryOrg 指派或清除用户的组织归属。
+// orgID 为 nil 表示清除归属。
+func (s *postgresUserStore) AssignPrimaryOrg(ctx context.Context, userID string, orgID *string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE users SET is_platform_admin = $1 WHERE id = $2`, v, userID)
+		`UPDATE users SET primary_org_id = $1 WHERE id = $2`, orgID, userID)
 	if err != nil {
-		return fmt.Errorf("设置平台管理员失败: %w", err)
+		return fmt.Errorf("指派组织归属失败: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -148,4 +139,17 @@ func (s *postgresUserStore) SetPlatformAdmin(ctx context.Context, userID string,
 		return ErrUserNotFound
 	}
 	return nil
+}
+
+// CountByPrimaryOrg 统计归属到该节点的用户数。
+// 组织节点删除保护要用它——数据库层的外键是 ON DELETE RESTRICT，
+// 应用层先数一遍才能返回 409 而不是把驱动错误当 500 抛出去。
+func (s *postgresUserStore) CountByPrimaryOrg(ctx context.Context, orgID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM users WHERE primary_org_id = $1`, orgID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计组织归属用户失败: %w", err)
+	}
+	return n, nil
 }

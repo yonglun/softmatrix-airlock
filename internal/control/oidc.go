@@ -78,6 +78,7 @@ func (c *oidcClient) Exchange(ctx context.Context, code, verifier string) (*Iden
 
 	var claims struct {
 		Email             string `json:"email"`
+		EmailVerified     bool   `json:"email_verified"`
 		Name              string `json:"name"`
 		PreferredUsername string `json:"preferred_username"`
 	}
@@ -91,8 +92,9 @@ func (c *oidcClient) Exchange(ctx context.Context, code, verifier string) (*Iden
 	}
 
 	return &Identity{
-		Subject:     idToken.Subject,
-		Email:       claims.Email,
-		DisplayName: name,
+		Subject:       idToken.Subject,
+		Email:         claims.Email,
+		EmailVerified: claims.EmailVerified,
+		DisplayName:   name,
 	}, nil
 }

@@ -35,6 +35,7 @@ type AuthDeps struct {
 	Sessions       SessionStore
 	LoginStates    LoginStateStore
 	OIDC           OIDCClient
+	RBAC           RBACStore
 	BootstrapAdmin string
 	// SecureCookie 在生产（HTTPS）下必须为 true；本地 HTTP 调试置 false。
 	SecureCookie bool
@@ -143,7 +144,7 @@ func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.maybeGrantBootstrapAdmin(r.Context(), user); err != nil {
+	if err := a.maybeGrantBootstrapAdmin(r.Context(), user, *identity); err != nil {
 		slog.Error("授予 bootstrap 管理员失败", "user_id", user.ID, "err", err)
 	}
 

@@ -104,46 +104,6 @@ func TestUserStoreMarkDisabledEmptySliceIsNoop(t *testing.T) {
 	require.Len(t, active, 1, "空列表不应误伤任何用户")
 }
 
-func TestUserStorePlatformAdmin(t *testing.T) {
-	db := testDB(t)
-	cleanTables(t, db)
-	s := NewPostgresUserStore(db)
-	ctx := context.Background()
-
-	n, err := s.CountPlatformAdmins(ctx)
-	require.NoError(t, err)
-	require.Zero(t, n)
-
-	u, err := s.Upsert(ctx, &User{ExternalID: "s1", Email: "1@x", Status: UserStatusActive})
-	require.NoError(t, err)
-	require.NoError(t, s.SetPlatformAdmin(ctx, u.ID, true))
-
-	n, err = s.CountPlatformAdmins(ctx)
-	require.NoError(t, err)
-	require.Equal(t, 1, n)
-
-	got, err := s.ByExternalID(ctx, "s1")
-	require.NoError(t, err)
-	require.True(t, got.IsPlatformAdmin)
-}
-
-func TestUserStoreUpsertPreservesAdminFlagAndPrimaryOrg(t *testing.T) {
-	db := testDB(t)
-	cleanTables(t, db)
-	s := NewPostgresUserStore(db)
-	ctx := context.Background()
-
-	u, err := s.Upsert(ctx, &User{ExternalID: "s1", Email: "1@x", Status: UserStatusActive})
-	require.NoError(t, err)
-	require.NoError(t, s.SetPlatformAdmin(ctx, u.ID, true))
-
-	// 再次登录触发的 upsert 只该刷新画像，不该把管理员标志冲掉
-	again, err := s.Upsert(ctx, &User{ExternalID: "s1", Email: "1@x", DisplayName: "新名", Status: UserStatusActive})
-	require.NoError(t, err)
-	require.True(t, again.IsPlatformAdmin, "upsert 不得覆盖 is_platform_admin")
-	require.Equal(t, "新名", again.DisplayName)
-}
-
 func TestUserStoreUpsertSetsLastLoginAt(t *testing.T) {
 	db := testDB(t)
 	cleanTables(t, db)
@@ -157,4 +117,93 @@ func TestUserStoreUpsertSetsLastLoginAt(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, u.LastLoginAt)
 	require.WithinDuration(t, now, *u.LastLoginAt, time.Second)
+}
+
+func TestAssignPrimaryOrg(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	users := NewPostgresUserStore(db)
+	orgs := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, orgs.Create(ctx, &Org{ID: "rd", Name: "研发中心"}))
+	u, err := users.Upsert(ctx, &User{ExternalID: "u1", Email: "u1@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.Nil(t, u.PrimaryOrgID)
+
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, strp("rd")))
+
+	got, err := users.ByID(ctx, u.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.PrimaryOrgID)
+	require.Equal(t, "rd", *got.PrimaryOrgID)
+}
+
+func TestAssignPrimaryOrgClearsWithNil(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	users := NewPostgresUserStore(db)
+	orgs := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, orgs.Create(ctx, &Org{ID: "rd", Name: "研发中心"}))
+	u, err := users.Upsert(ctx, &User{ExternalID: "u1", Email: "u1@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, strp("rd")))
+
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, nil))
+
+	got, err := users.ByID(ctx, u.ID)
+	require.NoError(t, err)
+	require.Nil(t, got.PrimaryOrgID)
+}
+
+func TestAssignPrimaryOrgUnknownUser(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	users := NewPostgresUserStore(db)
+	require.ErrorIs(t, users.AssignPrimaryOrg(context.Background(), "ghost", nil), ErrUserNotFound)
+}
+
+func TestCountByPrimaryOrg(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	users := NewPostgresUserStore(db)
+	orgs := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, orgs.Create(ctx, &Org{ID: "rd", Name: "研发中心"}))
+	u, err := users.Upsert(ctx, &User{ExternalID: "u1", Email: "u1@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+
+	n, err := users.CountByPrimaryOrg(ctx, "rd")
+	require.NoError(t, err)
+	require.Zero(t, n)
+
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, strp("rd")))
+	n, err = users.CountByPrimaryOrg(ctx, "rd")
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
+func TestUpsertDoesNotResetPrimaryOrg(t *testing.T) {
+	// 重复登录不得把 Airlock 侧管理的归属抹掉——
+	// 与 P1.2a 立下的「登录只刷新 IdP 侧权威字段」是同一条规矩。
+	db := testDB(t)
+	cleanTables(t, db)
+	users := NewPostgresUserStore(db)
+	orgs := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, orgs.Create(ctx, &Org{ID: "rd", Name: "研发中心"}))
+	u, err := users.Upsert(ctx, &User{ExternalID: "u1", Email: "u1@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.NoError(t, users.AssignPrimaryOrg(ctx, u.ID, strp("rd")))
+
+	again, err := users.Upsert(ctx, &User{
+		ExternalID: "u1", Email: "u1@x.com", DisplayName: "改了名", Status: UserStatusActive,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, again.PrimaryOrgID, "再次登录不得清掉归属")
+	require.Equal(t, "rd", *again.PrimaryOrgID)
 }

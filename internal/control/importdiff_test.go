@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -142,4 +143,20 @@ func TestComputeDiffIsDeterministic(t *testing.T) {
 		require.Equal(t, first, ComputeDiff(remote, nil, "ldap"),
 			"同样输入必须产出同样顺序，否则预览页面每次刷新都在跳")
 	}
+}
+
+func TestComputeDiffReturnsEmptySliceNotNil(t *testing.T) {
+	// 复审第 6 条：nil slice 被 encoding/json 编码成 null，
+	// 前端写 preview.items.length 会直接抛异常。
+	// 幂等无变化是这个接口最常见的稳态返回，必须是 []。
+	remote := []ExternalOrgNode{{ExternalID: "ou=rd", Name: "研发中心"}}
+	local := []*Org{extOrg("o1", "研发中心", "ou=rd")}
+
+	got := ComputeDiff(remote, local, "ldap")
+	require.NotNil(t, got, "空差异必须是 []DiffItem{} 而不是 nil")
+	require.Empty(t, got)
+
+	encoded, err := json.Marshal(map[string]any{"items": got})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"items":[]}`, string(encoded))
 }

@@ -16,15 +16,14 @@ const (
 // User 是 Airlock 侧的用户。身份凭证由 IdP 持有，
 // 这里只镜像展示所需的最小画像 + Airlock 自己的归属与状态。
 type User struct {
-	ID              string
-	ExternalID      string // OIDC sub
-	Email           string
-	DisplayName     string
-	Status          string
-	IsPlatformAdmin bool
-	PrimaryOrgID    *string
-	LastLoginAt     *time.Time
-	ReconciledAt    *time.Time
+	ID           string
+	ExternalID   string // OIDC sub
+	Email        string
+	DisplayName  string
+	Status       string
+	PrimaryOrgID *string
+	LastLoginAt  *time.Time
+	ReconciledAt *time.Time
 }
 
 // Session 是一次登录会话。ID 是 token 的 sha256，不是 token 本身。
@@ -59,9 +58,10 @@ type Org struct {
 
 // Identity 是从 IdP 换回来的身份信息。
 type Identity struct {
-	Subject     string
-	Email       string
-	DisplayName string
+	Subject       string
+	Email         string
+	EmailVerified bool
+	DisplayName   string
 }
 
 var (
@@ -72,6 +72,9 @@ var (
 	ErrOrgHasChildren     = errors.New("组织节点下还有子节点")
 	ErrOrgHasKeys         = errors.New("组织节点下还有密钥")
 	ErrOrgCycle           = errors.New("不能把节点移动到自己的子树下")
+	ErrOrgHasUsers        = errors.New("组织节点下还有归属用户")
+	ErrRoleNotFound       = errors.New("角色不存在")
+	ErrGrantNotFound      = errors.New("角色授予不存在")
 )
 
 type UserStore interface {
@@ -80,8 +83,8 @@ type UserStore interface {
 	Upsert(ctx context.Context, u *User) (*User, error)
 	ListActive(ctx context.Context) ([]*User, error)
 	MarkDisabled(ctx context.Context, userIDs []string) error
-	CountPlatformAdmins(ctx context.Context) (int, error)
-	SetPlatformAdmin(ctx context.Context, userID string, v bool) error
+	AssignPrimaryOrg(ctx context.Context, userID string, orgID *string) error
+	CountByPrimaryOrg(ctx context.Context, orgID string) (int, error)
 }
 
 type SessionStore interface {
@@ -110,4 +113,39 @@ type OrgStore interface {
 	Subtree(ctx context.Context, id string) ([]*Org, error)
 	ByExternal(ctx context.Context, source, externalID string) (*Org, error)
 	All(ctx context.Context) ([]*Org, error)
+}
+
+// RoleGrant 是一条角色授予的完整记录，用于展示。
+type RoleGrant struct {
+	ID        string
+	UserID    string
+	RoleID    string
+	OrgID     *string
+	GrantedBy *string
+	CreatedAt time.Time
+}
+
+// Role 是一个角色。权限集不在这里——它由 authz 包的注册表定义。
+type Role struct {
+	ID          string
+	Name        string
+	Description string
+	IsBuiltin   bool
+}
+
+// RBACStore 管理角色与授予，并为 authz.Resolver 提供判定数据。
+type RBACStore interface {
+	// SyncBuiltinRoles 把 Go 侧定义的内置角色与其权限集写入数据库。
+	// 幂等：每次启动都跑，保证数据库与代码一致。
+	SyncBuiltinRoles(ctx context.Context) error
+	// ValidatePermissions 校验数据库里的权限字符串都已在 Go 注册表中注册。
+	ValidatePermissions(ctx context.Context) error
+
+	ListRoles(ctx context.Context) ([]Role, error)
+	CreateGrant(ctx context.Context, g RoleGrant) error
+	GetGrant(ctx context.Context, id string) (RoleGrant, error)
+	DeleteGrant(ctx context.Context, id string) error
+	ListGrantsForUser(ctx context.Context, userID string) ([]RoleGrant, error)
+	ListGrantsForOrg(ctx context.Context, orgID string) ([]RoleGrant, error)
+	CountGlobalGrantsOfRole(ctx context.Context, roleID string) (int, error)
 }

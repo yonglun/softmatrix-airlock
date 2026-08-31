@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/softmatrix/airlock/internal/authz"
 )
 
 // fakeOrgStore 是内存组织树，让 API 层可以脱离 Postgres 单测。
@@ -162,7 +164,8 @@ func newOrgAPI(t *testing.T) (*OrgAPI, *fakeOrgStore, *fakeSource) {
 	t.Helper()
 	store := newFakeOrgStore()
 	src := &fakeSource{}
-	return NewOrgAPI(store, src), store, src
+	resolver := authz.NewResolver(newFakeRBACStore())
+	return NewOrgAPI(store, src, resolver), store, src
 }
 
 func TestOrgAPICreate(t *testing.T) {
@@ -248,9 +251,12 @@ func TestOrgAPIImportPreviewDoesNotMutate(t *testing.T) {
 }
 
 func TestOrgAPIImportApply(t *testing.T) {
-	api, store, _ := newOrgAPI(t)
+	api, store, src := newOrgAPI(t)
+	// Task 18 起，服务端自己拉通讯录重算差异，客户端只勾选 external_id——
+	// 这里要让 fakeSource 真的能拉到 ou=rd，勾选才有意义。
+	src.nodes = []ExternalOrgNode{{ExternalID: "ou=rd", Name: "研发中心"}}
 
-	body := `{"items":[{"Kind":"added","ExternalID":"ou=rd","Name":"研发中心"}]}`
+	body := `{"external_ids":["ou=rd"]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/orgs/import/apply", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	api.HandleImportApply(rec, req)
@@ -272,5 +278,228 @@ func TestOrgAPIImportPreviewSurfacesSourceFailure(t *testing.T) {
 	rec := httptest.NewRecorder()
 	api.HandleImportPreview(rec, httptest.NewRequest(http.MethodGet, "/api/orgs/import/preview", nil))
 
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// visibilityFixture 造一棵树与一个带判定器的 OrgAPI。
+//
+//	root
+//	├── rd
+//	│   └── gw
+//	└── sales
+func visibilityFixture(t *testing.T) (*OrgAPI, *fakeOrgStore, *fakeRBACStore) {
+	t.Helper()
+	store := newFakeOrgStore()
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "root", Name: "集团"}))
+	require.NoError(t, store.Create(ctx, &Org{ID: "rd", Name: "研发中心", ParentID: strp("root")}))
+	require.NoError(t, store.Create(ctx, &Org{ID: "gw", Name: "网关组", ParentID: strp("rd")}))
+	require.NoError(t, store.Create(ctx, &Org{ID: "sales", Name: "销售部", ParentID: strp("root")}))
+
+	rbac := newFakeRBACStore()
+	rbac.setPath("root", "/root")
+	rbac.setPath("rd", "/root/rd")
+	rbac.setPath("gw", "/root/rd/gw")
+	rbac.setPath("sales", "/root/sales")
+
+	api := NewOrgAPI(store, &fakeSource{}, authz.NewResolver(rbac))
+	return api, store, rbac
+}
+
+// listAs 以某个用户身份调用 HandleList，返回可见节点名集合。
+func listAs(t *testing.T, api *OrgAPI, u *User) []string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/orgs", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey, u))
+	rec := httptest.NewRecorder()
+	api.HandleList(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got []Org
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	var names []string
+	for _, o := range got {
+		names = append(names, o.Name)
+	}
+	return names
+}
+
+func TestListShowsWholeTreeForGlobalReader(t *testing.T) {
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleAuditor,
+	}))
+
+	require.ElementsMatch(t, []string{"集团", "研发中心", "网关组", "销售部"}, listAs(t, api, u))
+}
+
+func TestListShowsSubtreeAndAncestorsForScopedGrant(t *testing.T) {
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	}))
+
+	// rd 及其子树 gw 是真实作用域；root 是祖先，给出来才能渲染成树。
+	// sales 与该用户无关，不该出现。
+	require.ElementsMatch(t, []string{"集团", "研发中心", "网关组"}, listAs(t, api, u))
+}
+
+func TestListShowsHomeSubtreeForImplicitBaseline(t *testing.T) {
+	api, _, _ := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive, PrimaryOrgID: strp("rd")}
+
+	require.ElementsMatch(t, []string{"集团", "研发中心", "网关组"}, listAs(t, api, u))
+}
+
+func TestListIsEmptyWithoutAnyReadAccess(t *testing.T) {
+	api, _, _ := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	require.Empty(t, listAs(t, api, u))
+}
+
+// moveAs 以某用户身份把 nodeID 移到 newParent 之下。
+func moveAs(t *testing.T, api *OrgAPI, u *User, nodeID string, newParent *string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"parent_id":null}`
+	if newParent != nil {
+		body = `{"parent_id":"` + *newParent + `"}`
+	}
+	req := httptest.NewRequest(http.MethodPatch, "/api/orgs/"+nodeID+"/parent", strings.NewReader(body))
+	req.SetPathValue("id", nodeID)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey, u))
+	rec := httptest.NewRecorder()
+	api.HandleMove(rec, req)
+	return rec
+}
+
+func TestMoveRejectsWhenLackingPermissionOnDestination(t *testing.T) {
+	// 只在源节点 rd 上有权限，把 rd 的子节点塞进别人管的 sales 之下——必须拒绝。
+	// 否则一个部门管理员能把自己的子树挂到任何部门下面。
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	}))
+
+	rec := moveAs(t, api, u, "gw", strp("sales"))
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "permission_denied")
+}
+
+func TestMoveAllowsWhenHoldingBothEnds(t *testing.T) {
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("root"),
+	}))
+
+	rec := moveAs(t, api, u, "gw", strp("sales"))
+	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestMoveToRootRequiresGlobalGrant(t *testing.T) {
+	// 把节点移成根节点：目标为 nil，按边界规则要求全局授予。
+	api, _, rbac := visibilityFixture(t)
+	scoped := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("root"),
+	}))
+	require.Equal(t, http.StatusForbidden, moveAs(t, api, scoped, "gw", nil).Code)
+
+	global := &User{ID: "u2", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g2", UserID: "u2", RoleID: authz.RoleOrgAdmin,
+	}))
+	require.Equal(t, http.StatusNoContent, moveAs(t, api, global, "gw", nil).Code)
+}
+
+// applyAs 以某用户身份提交导入选择。
+func applyAs(t *testing.T, api *OrgAPI, u *User, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/import/apply", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.HandleImportApply(rec, asUser(req, u))
+	return rec
+}
+
+func TestImportApplyIgnoresClientSuppliedDiffContent(t *testing.T) {
+	// 复审第 3 条：客户端过去能完全控制 Kind/Name/OrgID/ParentExternalID，
+	// 从而在本地建出一个 external_id 由攻击者指定的节点，
+	// 让真实的目录节点之后永远被判定为「已存在」而不再导入。
+	// 现在服务端重新拉取并重算，客户端只能勾选。
+	store := newFakeOrgStore()
+	src := &fakeSource{nodes: []ExternalOrgNode{{ExternalID: "ou=rd", Name: "研发中心"}}}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	// 客户端伪造一条 LDAP 里根本不存在的项
+	rec := applyAs(t, api, u, `{"external_ids":["ou=finance"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var res ImportResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	require.Zero(t, res.Created, "LDAP 里不存在的项不得被创建")
+
+	_, err := store.ByExternal(context.Background(), "ldap", "ou=finance")
+	require.ErrorIs(t, err, ErrOrgNotFound)
+}
+
+func TestImportApplyAppliesOnlySelectedItems(t *testing.T) {
+	store := newFakeOrgStore()
+	src := &fakeSource{nodes: []ExternalOrgNode{
+		{ExternalID: "ou=rd", Name: "研发中心"},
+		{ExternalID: "ou=sales", Name: "销售部"},
+	}}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var res ImportResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	require.Equal(t, 1, res.Created)
+
+	_, err := store.ByExternal(context.Background(), "ldap", "ou=rd")
+	require.NoError(t, err)
+	_, err = store.ByExternal(context.Background(), "ldap", "ou=sales")
+	require.ErrorIs(t, err, ErrOrgNotFound, "没勾选的项不得被应用")
+}
+
+func TestImportApplyReturnsWhatWasActuallyApplied(t *testing.T) {
+	// 预览与应用之间目录可能变化。服务端按最新事实动作，
+	// 并把实际执行的差异项回传，让调用方看见发生了什么。
+	store := newFakeOrgStore()
+	src := &fakeSource{nodes: []ExternalOrgNode{{ExternalID: "ou=rd", Name: "研发中心"}}}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var res struct {
+		Created int        `json:"Created"`
+		Applied []DiffItem `json:"applied"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	require.Len(t, res.Applied, 1)
+	require.Equal(t, "ou=rd", res.Applied[0].ExternalID)
+	require.Equal(t, DiffAdded, res.Applied[0].Kind)
+}
+
+func TestImportApplySurfacesSourceFailure(t *testing.T) {
+	store := newFakeOrgStore()
+	src := &fakeSource{err: context.DeadlineExceeded}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 }

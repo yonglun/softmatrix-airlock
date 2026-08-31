@@ -71,3 +71,31 @@ func TestLoadRejectsBadReconcileInterval(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "RECONCILE_INTERVAL")
 }
+
+func TestReconcileIntervalRejectsNonPositive(t *testing.T) {
+	// 复审第 5 条：time.NewTicker 在 d <= 0 时 panic，
+	// 且 panic 发生在无 recover 的 goroutine 里，整个进程崩溃。
+	// RECONCILE_INTERVAL=0 是「关掉对账」的自然写法（实际做法是留空 LDAP_URL），
+	// 必须给出明确的配置错误而不是崩溃。
+	for _, raw := range []string{"0", "0s", "-5m"} {
+		_, err := Load(func(k string) string {
+			if k == "RECONCILE_INTERVAL" {
+				return raw
+			}
+			return ""
+		})
+		require.Error(t, err, "RECONCILE_INTERVAL=%s 应被拒绝", raw)
+		require.Contains(t, err.Error(), "RECONCILE_INTERVAL")
+	}
+}
+
+func TestReconcileIntervalAcceptsPositive(t *testing.T) {
+	cfg, err := Load(func(k string) string {
+		if k == "RECONCILE_INTERVAL" {
+			return "30s"
+		}
+		return ""
+	})
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, cfg.ReconcileInterval)
+}

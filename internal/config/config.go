@@ -59,6 +59,14 @@ func Load(getenv Getenv) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("RECONCILE_INTERVAL 不是合法的时间间隔（如 5m、30s）: %w", err)
 		}
+		// time.NewTicker 在 d <= 0 时 panic，且那个 panic 发生在对账循环的
+		// goroutine 里、没有 recover，会让整个进程崩溃。
+		// 关掉对账的正确做法是留空 LDAP_URL，不是把周期设成 0。
+		if d <= 0 {
+			return Config{}, fmt.Errorf(
+				"RECONCILE_INTERVAL 必须为正数，当前为 %s；"+
+					"如需关闭离职对账，请改为不设置 LDAP_URL", raw)
+		}
 		cfg.ReconcileInterval = d
 	}
 

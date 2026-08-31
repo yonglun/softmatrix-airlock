@@ -17,13 +17,12 @@ import (
 // ---- 内存假实现 ----
 
 type fakeUserStore struct {
-	mu     sync.Mutex
-	byExt  map[string]*User
-	admins map[string]bool
+	mu    sync.Mutex
+	byExt map[string]*User
 }
 
 func newFakeUserStore() *fakeUserStore {
-	return &fakeUserStore{byExt: map[string]*User{}, admins: map[string]bool{}}
+	return &fakeUserStore{byExt: map[string]*User{}}
 }
 
 func (f *fakeUserStore) ByID(_ context.Context, id string) (*User, error) {
@@ -32,7 +31,6 @@ func (f *fakeUserStore) ByID(_ context.Context, id string) (*User, error) {
 	for _, u := range f.byExt {
 		if u.ID == id {
 			cp := *u
-			cp.IsPlatformAdmin = f.admins[u.ID]
 			return &cp, nil
 		}
 	}
@@ -47,7 +45,6 @@ func (f *fakeUserStore) ByExternalID(_ context.Context, ext string) (*User, erro
 		return nil, ErrUserNotFound
 	}
 	cp := *u
-	cp.IsPlatformAdmin = f.admins[u.ID]
 	return &cp, nil
 }
 
@@ -60,7 +57,6 @@ func (f *fakeUserStore) Upsert(_ context.Context, u *User) (*User, error) {
 		existing.DisplayName = u.DisplayName
 		existing.LastLoginAt = u.LastLoginAt
 		cp := *existing
-		cp.IsPlatformAdmin = f.admins[existing.ID]
 		return &cp, nil
 	}
 	cp := *u
@@ -101,21 +97,28 @@ func (f *fakeUserStore) MarkDisabled(_ context.Context, ids []string) error {
 	return nil
 }
 
-func (f *fakeUserStore) CountPlatformAdmins(context.Context) (int, error) {
+func (f *fakeUserStore) AssignPrimaryOrg(_ context.Context, id string, orgID *string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.admins), nil
+	for _, u := range f.byExt {
+		if u.ID == id {
+			u.PrimaryOrgID = orgID
+			return nil
+		}
+	}
+	return ErrUserNotFound
 }
 
-func (f *fakeUserStore) SetPlatformAdmin(_ context.Context, id string, v bool) error {
+func (f *fakeUserStore) CountByPrimaryOrg(_ context.Context, orgID string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if v {
-		f.admins[id] = true
-	} else {
-		delete(f.admins, id)
+	n := 0
+	for _, u := range f.byExt {
+		if u.PrimaryOrgID != nil && *u.PrimaryOrgID == orgID {
+			n++
+		}
 	}
-	return nil
+	return n, nil
 }
 
 type fakeSessionStore struct {
