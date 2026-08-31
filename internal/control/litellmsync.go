@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -191,4 +192,85 @@ func (s *Syncer) Plan(ctx context.Context) (SyncPlan, error) {
 	sort.Strings(plan.ExtraOrgs)
 	sort.Strings(plan.ExtraTeams)
 	return plan, nil
+}
+
+// SyncResult 汇总一轮对账的结果。
+type SyncResult struct {
+	OrgsCreated  int
+	OrgsUpdated  int
+	TeamsCreated int
+	TeamsUpdated int
+	// Skipped 是因所属组织不存在而本轮跳过的团队数。
+	Skipped int
+	// ExtraOrgs / ExtraTeams 是 LiteLLM 侧多出来、未被触碰的实体。
+	ExtraOrgs  []string
+	ExtraTeams []string
+	// Errors 是单个实体的失败原因。不为空时 ReconcileOnce 整体也返回错误。
+	Errors []string
+}
+
+// ReconcileOnce 跑一轮对账：补建缺失的、纠正不一致的，绝不删除多出来的。
+//
+// 单个实体失败只记录并继续处理其余实体——各节点彼此独立，
+// 一个坏节点不该把整棵树卡住，失败项下一轮自动重试。
+func (s *Syncer) ReconcileOnce(ctx context.Context) (SyncResult, error) {
+	var res SyncResult
+
+	plan, err := s.Plan(ctx)
+	if err != nil {
+		return res, err
+	}
+	res.ExtraOrgs, res.ExtraTeams = plan.ExtraOrgs, plan.ExtraTeams
+
+	// 已经在上游存在的组织 = Plan 记下的 ExistingOrgs + 本轮成功建出来的。
+	// 不再多发一次 ListOrganizations：Plan 刚刚才拉过，重复拉既浪费一次往返，
+	// 又给了两次调用之间状态漂移的机会。
+	//
+	// 团队只会挂到 depth-2 节点上，而 depth-2 节点必然都在期望态里，
+	// 所以这个集合足够判断「团队的所属组织是否已存在」。
+	liveOrgs := make(map[string]bool, len(plan.ExistingOrgs))
+	for _, id := range plan.ExistingOrgs {
+		liveOrgs[id] = true
+	}
+
+	// ---- 第一阶段：组织 ----
+	for _, o := range plan.MissingOrgs {
+		if err := s.deps.Admin.CreateOrganization(ctx, o); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("创建组织 %s 失败: %v", o.ID, err))
+			continue
+		}
+		liveOrgs[o.ID] = true
+		res.OrgsCreated++
+	}
+	for _, o := range plan.MismatchedOrgs {
+		if err := s.deps.Admin.UpdateOrganization(ctx, o); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("更新组织 %s 失败: %v", o.ID, err))
+			continue
+		}
+		res.OrgsUpdated++
+	}
+
+	// ---- 第二阶段：团队（顺序约束）----
+	apply := func(list []litellm.Team, act func(context.Context, litellm.Team) error, verb string, n *int) {
+		for _, t := range list {
+			if t.OrganizationID != nil && !liveOrgs[*t.OrganizationID] {
+				res.Skipped++
+				slog.Warn("所属组织不存在，本轮跳过该团队",
+					"team", t.ID, "organization", *t.OrganizationID)
+				continue
+			}
+			if err := act(ctx, t); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("%s团队 %s 失败: %v", verb, t.ID, err))
+				continue
+			}
+			*n++
+		}
+	}
+	apply(plan.MissingTeams, s.deps.Admin.CreateTeam, "创建", &res.TeamsCreated)
+	apply(plan.MismatchedTeams, s.deps.Admin.UpdateTeam, "更新", &res.TeamsUpdated)
+
+	if len(res.Errors) > 0 {
+		return res, fmt.Errorf("本轮同步有 %d 项失败，将在下轮重试", len(res.Errors))
+	}
+	return res, nil
 }

@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -211,4 +212,117 @@ func TestPlanAbortsWhenListTeamsFails(t *testing.T) {
 
 	_, err := s.Plan(context.Background())
 	require.Error(t, err)
+}
+
+func TestReconcileCreatesEverythingOnEmptyUpstream(t *testing.T) {
+	s, _, admin := syncFixture(t)
+
+	res, err := s.ReconcileOnce(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 2, res.OrgsCreated)
+	require.Equal(t, 1, res.TeamsCreated)
+	require.Contains(t, admin.orgs, "rd")
+	require.Contains(t, admin.teams, "gw")
+	require.Equal(t, "rd", *admin.teams["gw"].OrganizationID)
+}
+
+func TestReconcileCreatesOrganizationsBeforeTeams(t *testing.T) {
+	// 上游对挂到不存在 organization_id 的 Team 会 400 拒绝，
+	// 所以顺序不是风格问题，是硬约束。
+	s, _, admin := syncFixture(t)
+
+	_, err := s.ReconcileOnce(context.Background())
+	require.NoError(t, err)
+
+	lastOrg, firstTeam := -1, -1
+	for i, c := range admin.calls {
+		if strings.HasPrefix(c, "create-org:") {
+			lastOrg = i
+		}
+		if strings.HasPrefix(c, "create-team:") && firstTeam < 0 {
+			firstTeam = i
+		}
+	}
+	require.Greater(t, firstTeam, lastOrg, "所有组织必须先于团队创建")
+}
+
+func TestReconcileIsIdempotent(t *testing.T) {
+	s, _, admin := syncFixture(t)
+
+	_, err := s.ReconcileOnce(context.Background())
+	require.NoError(t, err)
+	admin.calls = nil
+
+	res, err := s.ReconcileOnce(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, res.OrgsCreated)
+	require.Zero(t, res.TeamsCreated)
+	require.Empty(t, admin.calls, "已经一致时不该再发任何写请求")
+}
+
+func TestReconcileFixesDrift(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	_, err := s.ReconcileOnce(context.Background())
+	require.NoError(t, err)
+
+	// 有人在 LiteLLM 侧改了名字、又把团队挂到别的组织下。
+	admin.orgs["rd"] = litellm.Organization{ID: "rd", Alias: "被改过"}
+	admin.teams["gw"] = litellm.Team{ID: "gw", Alias: "也被改过", OrganizationID: strp("rd2")}
+
+	res, err := s.ReconcileOnce(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, res.OrgsUpdated)
+	require.Equal(t, 1, res.TeamsUpdated)
+	require.Equal(t, "研发中心", admin.orgs["rd"].Alias)
+	require.Equal(t, "网关组", admin.teams["gw"].Alias)
+	require.Equal(t, "rd", *admin.teams["gw"].OrganizationID)
+}
+
+func TestReconcileNeverDeletesExtraEntities(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	admin.orgs["stranger"] = litellm.Organization{ID: "stranger", Alias: "别人建的"}
+
+	res, err := s.ReconcileOnce(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, admin.orgs, "stranger", "多出来的实体绝不删除")
+	require.Equal(t, []string{"stranger"}, res.ExtraOrgs)
+	for _, c := range admin.calls {
+		require.False(t, strings.HasPrefix(c, "delete-"), "对账不该发任何删除请求：%s", c)
+	}
+}
+
+func TestReconcileOneFailureDoesNotBlockOthers(t *testing.T) {
+	// 各节点彼此独立，一个坏节点不该把整棵树卡住。
+	// 这一条与离职对账相反——那里的几步是有序且安全攸关的。
+	s, _, admin := syncFixture(t)
+	admin.failCreateOrg["rd"] = true
+
+	res, err := s.ReconcileOnce(context.Background())
+	require.Error(t, err, "整体仍然报错，让调用方知道这轮没干净")
+	require.Contains(t, admin.orgs, "rd2", "其余组织照常创建")
+	require.Len(t, res.Errors, 1)
+}
+
+func TestReconcileSkipsTeamWhoseOrgFailed(t *testing.T) {
+	// rd 建不出来，挂在它下面的 gw 就不该硬撞上游的 400，
+	// 而应该被跳过并说明原因，下一轮再试。
+	s, _, admin := syncFixture(t)
+	admin.failCreateOrg["rd"] = true
+
+	res, err := s.ReconcileOnce(context.Background())
+	require.Error(t, err)
+	require.NotContains(t, admin.teams, "gw")
+	require.Equal(t, 1, res.Skipped)
+	for _, c := range admin.calls {
+		require.NotEqual(t, "create-team:gw", c, "不该对缺失组织的团队发创建请求")
+	}
+}
+
+func TestReconcileAbortsEntirelyWhenListFails(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	admin.listOrgsErr = errors.New("上游不可用")
+
+	_, err := s.ReconcileOnce(context.Background())
+	require.Error(t, err)
+	require.Empty(t, admin.calls, "拉取失败时不该发出任何写请求")
 }
