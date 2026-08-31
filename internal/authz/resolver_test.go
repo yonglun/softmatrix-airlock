@@ -306,3 +306,116 @@ func TestImplicitBaselineWithDanglingPrimaryOrgIsNotFatal(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok, "显式授予不该被悬空的归属拖累")
 }
+
+func TestPermissionsReturnsEffectiveSet(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["u1"] = []Grant{{RoleID: RoleOrgAdmin, OrgID: strp("rd")}}
+	r := NewResolver(st)
+
+	got, err := r.Permissions(context.Background(), activeSubject("u1"), strp("rd"))
+	require.NoError(t, err)
+	require.True(t, got[PermOrgWrite])
+	require.True(t, got[PermGrantWrite])
+	require.False(t, got[PermPlatformConfigure], "节点级授予拿不到全局权限")
+}
+
+func TestPermissionsGlobalOnlyForNilTarget(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["u1"] = []Grant{{RoleID: RolePlatformAdmin}}
+	r := NewResolver(st)
+
+	got, err := r.Permissions(context.Background(), activeSubject("u1"), nil)
+	require.NoError(t, err)
+	require.True(t, got[PermPlatformConfigure])
+	require.True(t, got[PermAuditRead])
+}
+
+func TestScopesGlobalGrant(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["u1"] = []Grant{{RoleID: RoleOrgAdmin}}
+	r := NewResolver(st)
+
+	global, nodes, err := r.Scopes(context.Background(), activeSubject("u1"), PermOrgRead)
+	require.NoError(t, err)
+	require.True(t, global, "全局授予应报告为全局可见")
+	require.Empty(t, nodes)
+}
+
+func TestScopesCollectsGrantedNodes(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["u1"] = []Grant{
+		{RoleID: RoleOrgAdmin, OrgID: strp("rd")},
+		{RoleID: RoleAuditor, OrgID: strp("rd2")},
+	}
+	r := NewResolver(st)
+
+	global, nodes, err := r.Scopes(context.Background(), activeSubject("u1"), PermOrgRead)
+	require.NoError(t, err)
+	require.False(t, global)
+	require.ElementsMatch(t, []string{"rd", "rd2"}, nodes)
+}
+
+func TestScopesExcludesNodesWhoseRoleLacksThePermission(t *testing.T) {
+	// 可见范围以 org:read 这一条权限为准，而不是「持有任何授予即可见」。
+	// P1.4 出现自定义角色后就会有不含 org:read 的角色。
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["u1"] = []Grant{{RoleID: RoleOrgAdmin, OrgID: strp("rd")}}
+	r := NewResolver(st)
+
+	_, nodes, err := r.Scopes(context.Background(), activeSubject("u1"), PermPlatformConfigure)
+	require.NoError(t, err)
+	require.Empty(t, nodes, "组织管理员不含全局配置权限，不该报告任何作用域")
+}
+
+func TestCanGrantAllowsSubsetOfOwnPermissions(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["boss"] = []Grant{{RoleID: RoleOrgAdmin, OrgID: strp("rd")}}
+	r := NewResolver(st)
+
+	ok, err := r.CanGrant(context.Background(), activeSubject("boss"), RoleDeveloper, strp("rd"))
+	require.NoError(t, err)
+	require.True(t, ok, "开发者的权限集是组织管理员的子集，可以授予")
+}
+
+func TestCanGrantRejectsEscalation(t *testing.T) {
+	// 防提权：组织管理员不能授予含全局权限的角色，
+	// 否则可以给自己授予平台管理员，绕过 D4 的作用域限制。
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["boss"] = []Grant{{RoleID: RoleOrgAdmin, OrgID: strp("rd")}}
+	r := NewResolver(st)
+
+	ok, err := r.CanGrant(context.Background(), activeSubject("boss"), RolePlatformAdmin, strp("rd"))
+	require.NoError(t, err)
+	require.False(t, ok, "不能授予自己不持有的权限")
+}
+
+func TestCanGrantPlatformAdminCanGrantAnything(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["root"] = []Grant{{RoleID: RolePlatformAdmin}}
+	r := NewResolver(st)
+
+	for _, role := range BuiltinRoles() {
+		ok, err := r.CanGrant(context.Background(), activeSubject("root"), role.ID, strp("rd"))
+		require.NoError(t, err)
+		require.True(t, ok, "全局平台管理员应能授予 %s", role.ID)
+	}
+}
+
+func TestCanGrantUnknownRoleIsDenied(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["root"] = []Grant{{RoleID: RolePlatformAdmin}}
+	r := NewResolver(st)
+
+	ok, err := r.CanGrant(context.Background(), activeSubject("root"), "ghost_role", strp("rd"))
+	require.NoError(t, err)
+	require.False(t, ok, "角色不存在时权限集为空，授予无意义，应拒绝")
+}

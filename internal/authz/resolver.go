@@ -178,3 +178,96 @@ func (r *Resolver) ancestorChain(ctx context.Context, orgID string) (map[string]
 	}
 	return out, nil
 }
+
+// Permissions 返回主体在目标节点上的全部有效权限。
+// target 为 nil 时只统计全局授予赋予的全局权限。
+//
+// 供 /api/whoami 与需要一次性拿到整个权限集的场景使用——
+// 逐条调用 Can 会重复查询授予与路径。
+func (r *Resolver) Permissions(ctx context.Context, s Subject, target *string) (map[string]bool, error) {
+	if !s.Active {
+		return map[string]bool{}, nil
+	}
+	scope := ScopeGlobal
+	if target != nil {
+		scope = ScopeOrg
+	}
+	return r.effectivePermissions(ctx, s, scope, target)
+}
+
+// Scopes 返回主体持有某权限的作用域。
+//
+// global 为 true 表示该权限在全树生效（来自全局授予）；
+// 否则 orgIDs 是持有该权限的节点列表，权限覆盖这些节点各自的整棵子树。
+//
+// 供组织树列表过滤使用：逐个节点调用 Can 会退化成 N 次查询。
+func (r *Resolver) Scopes(ctx context.Context, s Subject, permission string) (bool, []string, error) {
+	if _, ok := Lookup(permission); !ok {
+		return false, nil, fmt.Errorf("未注册的权限: %s", permission)
+	}
+	if !s.Active {
+		return false, nil, nil
+	}
+
+	grants, err := r.store.GrantsForUser(ctx, s.UserID)
+	if err != nil {
+		return false, nil, fmt.Errorf("查询用户授予失败: %w", err)
+	}
+
+	global := false
+	seen := map[string]bool{}
+	var nodes []string
+
+	for _, g := range grants {
+		perms, err := r.store.PermissionsForRole(ctx, g.RoleID)
+		if err != nil {
+			return false, nil, fmt.Errorf("查询角色权限失败（role=%s）: %w", g.RoleID, err)
+		}
+		if !contains(perms, permission) {
+			continue
+		}
+		if g.OrgID == nil {
+			global = true
+			continue
+		}
+		if !seen[*g.OrgID] {
+			seen[*g.OrgID] = true
+			nodes = append(nodes, *g.OrgID)
+		}
+	}
+	return global, nodes, nil
+}
+
+// CanGrant 判定授予者能否在目标节点上授予某个角色。
+//
+// 规则：被授予角色的权限集必须是授予者在该节点上已持有权限的子集。
+// 否则组织管理员可以给自己授予一个含全局权限的角色，
+// 绕过「全局权限只能由全局授予赋予」这条限制间接提权。
+func (r *Resolver) CanGrant(ctx context.Context, granter Subject, roleID string, target *string) (bool, error) {
+	perms, err := r.store.PermissionsForRole(ctx, roleID)
+	if err != nil {
+		return false, fmt.Errorf("查询角色权限失败（role=%s）: %w", roleID, err)
+	}
+	if len(perms) == 0 {
+		return false, nil // 角色不存在或没有权限，授予它没有意义
+	}
+	for _, p := range perms {
+		ok, err := r.Can(ctx, granter, p, target)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
