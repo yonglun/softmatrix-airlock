@@ -209,6 +209,11 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Permission: authz.PermOrgDelete, Target: TargetFromPath("id"),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleDelete }),
 		},
+		{
+			Pattern: "PUT /api/orgs/{id}/key-holder", Access: AccessPermission,
+			Permission: authz.PermOrgWrite, Target: TargetFromPath("id"),
+			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleSetKeyHolder }),
+		},
 
 		// ---- 通讯录导入：作用面覆盖整棵树，要求全局授予 ----
 		{

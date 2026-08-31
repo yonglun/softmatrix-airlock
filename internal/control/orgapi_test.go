@@ -514,3 +514,53 @@ func TestImportApplySurfacesSourceFailure(t *testing.T) {
 	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 }
+
+func TestSetKeyHolderMarksAndUnmarks(t *testing.T) {
+	api, store, _ := newOrgAPI(t)
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "gw", Name: "网关组"}))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{"is_key_holder":true}`))
+	req.SetPathValue("id", "gw")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	got, err := store.Get(ctx, "gw")
+	require.NoError(t, err)
+	require.True(t, got.IsKeyHolder)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{"is_key_holder":false}`))
+	req.SetPathValue("id", "gw")
+	rec = httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	got, err = store.Get(ctx, "gw")
+	require.NoError(t, err)
+	require.False(t, got.IsKeyHolder)
+}
+
+func TestSetKeyHolderUnknownNodeIs404(t *testing.T) {
+	api, _, _ := newOrgAPI(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/nope/key-holder",
+		strings.NewReader(`{"is_key_holder":true}`))
+	req.SetPathValue("id", "nope")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestSetKeyHolderRejectsMalformedBody(t *testing.T) {
+	api, _, _ := newOrgAPI(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{not json`))
+	req.SetPathValue("id", "gw")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}

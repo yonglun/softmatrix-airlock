@@ -241,6 +241,7 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"PATCH /api/orgs/{id}/name",
 		"PATCH /api/orgs/{id}/parent",
 		"DELETE /api/orgs/{id}",
+		"PUT /api/orgs/{id}/key-holder",
 		"GET /api/orgs/import/preview",
 		"POST /api/orgs/import/apply",
 		"GET /api/roles",
