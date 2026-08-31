@@ -129,6 +129,20 @@ func (s *postgresRBACStore) CreateGrant(ctx context.Context, g RoleGrant) error 
 	return nil
 }
 
+func (s *postgresRBACStore) GetGrant(ctx context.Context, id string) (RoleGrant, error) {
+	var g RoleGrant
+	err := s.db.QueryRowContext(ctx,
+		`SELECT `+grantColumns+` FROM role_grants WHERE id = $1`, id).
+		Scan(&g.ID, &g.UserID, &g.RoleID, &g.OrgID, &g.GrantedBy, &g.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RoleGrant{}, ErrGrantNotFound
+	}
+	if err != nil {
+		return RoleGrant{}, fmt.Errorf("查询角色授予失败: %w", err)
+	}
+	return g, nil
+}
+
 func (s *postgresRBACStore) DeleteGrant(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM role_grants WHERE id = $1`, id)
 	if err != nil {

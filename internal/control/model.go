@@ -142,6 +142,7 @@ type RBACStore interface {
 
 	ListRoles(ctx context.Context) ([]Role, error)
 	CreateGrant(ctx context.Context, g RoleGrant) error
+	GetGrant(ctx context.Context, id string) (RoleGrant, error)
 	DeleteGrant(ctx context.Context, id string) error
 	ListGrantsForUser(ctx context.Context, userID string) ([]RoleGrant, error)
 	ListGrantsForOrg(ctx context.Context, orgID string) ([]RoleGrant, error)

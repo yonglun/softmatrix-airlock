@@ -243,6 +243,11 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"DELETE /api/orgs/{id}",
 		"GET /api/orgs/import/preview",
 		"POST /api/orgs/import/apply",
+		"GET /api/roles",
+		"GET /api/orgs/{id}/grants",
+		"POST /api/grants",
+		"DELETE /api/grants/{id}",
+		"PUT /api/users/{id}/primary-org",
 	} {
 		require.True(t, patterns[want], "路由表缺少 %s", want)
 	}

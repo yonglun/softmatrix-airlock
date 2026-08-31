@@ -38,6 +38,16 @@ func (f *fakeRBACStore) CreateGrant(_ context.Context, g RoleGrant) error {
 	return nil
 }
 
+func (f *fakeRBACStore) GetGrant(_ context.Context, id string) (RoleGrant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g, ok := f.grants[id]
+	if !ok {
+		return RoleGrant{}, ErrGrantNotFound
+	}
+	return g, nil
+}
+
 func (f *fakeRBACStore) DeleteGrant(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

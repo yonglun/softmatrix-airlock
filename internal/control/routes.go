@@ -156,6 +156,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.OrgAPI)
 	}
+	grantH := func(pick func(*GrantAPI) http.HandlerFunc) http.HandlerFunc {
+		if deps.GrantAPI == nil {
+			return stub
+		}
+		return pick(deps.GrantAPI)
+	}
 
 	return []Route{
 		// ---- 公开：无需登录 ----
@@ -224,6 +230,33 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "POST /api/orgs/import/apply", Access: AccessPermission,
 			Permission: authz.PermOrgImport, Target: TargetGlobal(),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleImportApply }),
+		},
+
+		// ---- 角色授予与成员归属 ----
+		{
+			Pattern: "GET /api/roles", Access: AccessAuthenticated,
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleListRoles }),
+		},
+		{
+			Pattern: "GET /api/orgs/{id}/grants", Access: AccessPermission,
+			Permission: authz.PermGrantRead, Target: TargetFromPath("id"),
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleListGrants }),
+		},
+		{
+			Pattern: "POST /api/grants", Access: AccessPermission,
+			Permission: authz.PermGrantWrite, Target: TargetFromBody("org_id"),
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleCreateGrant }),
+		},
+		{
+			// 撤销授予要判定的是「授予所在的节点」，而路径里只有授予 ID，
+			// 中间件拿不到目标节点。判定下沉到 HandleDeleteGrant 自己做。
+			Pattern: "DELETE /api/grants/{id}", Access: AccessAuthenticated,
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleDeleteGrant }),
+		},
+		{
+			Pattern: "PUT /api/users/{id}/primary-org", Access: AccessPermission,
+			Permission: authz.PermMemberAssign, Target: TargetFromBody("org_id"),
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleAssignPrimaryOrg }),
 		},
 	}
 }
