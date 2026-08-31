@@ -84,12 +84,6 @@ func TargetGlobal() TargetExtractor {
 	return func(*http.Request) (*string, error) { return nil, nil }
 }
 
-// TargetFiltered 表示判定交给处理器自行按可见范围过滤。
-// 中间件仍会校验「主体在全局或任意节点上持有该权限」，但不针对单一目标。
-func TargetFiltered() TargetExtractor {
-	return func(*http.Request) (*string, error) { return nil, nil }
-}
-
 // subjectOf 把 control.User 转成 authz 判定用的主体。
 func subjectOf(u *User) authz.Subject {
 	return authz.Subject{
@@ -186,8 +180,11 @@ func DefaultRoutes(deps ServerDeps) []Route {
 
 		// ---- 组织树 ----
 		{
-			Pattern: "GET /api/orgs", Access: AccessPermission,
-			Permission: authz.PermOrgRead, Target: TargetFiltered(),
+			// 按可见范围过滤发生在 HandleList 内部（无权限时返回 200+[]，
+			// 而不是 403——这是列表类接口的正确行为，与报错拒绝不同）。
+			// 中间件因此不做单一目标的权限判定，只要求已登录，
+			// 与 DELETE /api/grants/{id} 把判定下沉到处理器是同一类例外。
+			Pattern: "GET /api/orgs", Access: AccessAuthenticated,
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleList }),
 		},
 		{
