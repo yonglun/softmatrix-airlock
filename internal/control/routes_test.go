@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -173,4 +175,75 @@ func TestEnforceUnknownTargetOrgReturns404(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestEveryRouteDeclaresAccess(t *testing.T) {
+	// 机械检查之一：漏声明访问要求就挂。
+	// AccessMode 的零值是 AccessUndeclared，忘了写就会停在这里。
+	for _, rt := range DefaultRoutes(ServerDeps{}) {
+		require.NotEqual(t, AccessUndeclared, rt.Access,
+			"路由 %s 没有声明访问要求", rt.Pattern)
+
+		if rt.Access == AccessPermission {
+			require.NotEmpty(t, rt.Permission, "路由 %s 声明了需要权限却没写是哪条", rt.Pattern)
+			_, known := authz.Lookup(rt.Permission)
+			require.True(t, known, "路由 %s 引用了未注册的权限 %s", rt.Pattern, rt.Permission)
+			require.NotNil(t, rt.Target, "路由 %s 需要权限判定却没有目标提取器", rt.Pattern)
+		}
+	}
+}
+
+func TestNonPublicRoutesLiveUnderAPIPrefix(t *testing.T) {
+	// Handler() 把非公开路由挂在 /api/ 的会话中间件之后。
+	// 一条非公开路由若不在 /api/ 下，就会绕过会话校验——必须拦住。
+	for _, rt := range DefaultRoutes(ServerDeps{}) {
+		if rt.Access == AccessPublic {
+			continue
+		}
+		require.True(t, isAPIPattern(rt.Pattern),
+			"非公开路由 %s 不在 /api/ 前缀下，会绕过会话中间件", rt.Pattern)
+	}
+}
+
+func TestNoRouteRegistrationOutsideTheTable(t *testing.T) {
+	// 机械检查之二：堵住绕过路由表直接注册的旁路。
+	// 只允许 server.go 的 Handler() 里那两处 mux 注册。
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+
+	for _, f := range files {
+		if f == "server.go" || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		require.NoError(t, err)
+		require.NotContains(t, string(src), "mux.HandleFunc(",
+			"%s 里直接注册了路由，绕过了路由表；请改为在 DefaultRoutes 里声明", f)
+		require.NotContains(t, string(src), "mux.Handle(",
+			"%s 里直接注册了路由，绕过了路由表；请改为在 DefaultRoutes 里声明", f)
+	}
+}
+
+func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
+	patterns := map[string]bool{}
+	for _, rt := range DefaultRoutes(ServerDeps{}) {
+		patterns[rt.Pattern] = true
+	}
+	// 角色授予相关的路由在 Task 15 追加，届时这份清单也要一并扩充。
+	for _, want := range []string{
+		"GET /healthz",
+		"GET /auth/login",
+		"GET /auth/callback",
+		"POST /auth/logout",
+		"GET /api/whoami",
+		"GET /api/orgs",
+		"POST /api/orgs",
+		"PATCH /api/orgs/{id}/name",
+		"PATCH /api/orgs/{id}/parent",
+		"DELETE /api/orgs/{id}",
+		"GET /api/orgs/import/preview",
+		"POST /api/orgs/import/apply",
+	} {
+		require.True(t, patterns[want], "路由表缺少 %s", want)
+	}
 }
