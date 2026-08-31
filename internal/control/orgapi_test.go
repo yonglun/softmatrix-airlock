@@ -356,3 +356,59 @@ func TestListIsEmptyWithoutAnyReadAccess(t *testing.T) {
 
 	require.Empty(t, listAs(t, api, u))
 }
+
+// moveAs 以某用户身份把 nodeID 移到 newParent 之下。
+func moveAs(t *testing.T, api *OrgAPI, u *User, nodeID string, newParent *string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"parent_id":null}`
+	if newParent != nil {
+		body = `{"parent_id":"` + *newParent + `"}`
+	}
+	req := httptest.NewRequest(http.MethodPatch, "/api/orgs/"+nodeID+"/parent", strings.NewReader(body))
+	req.SetPathValue("id", nodeID)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey, u))
+	rec := httptest.NewRecorder()
+	api.HandleMove(rec, req)
+	return rec
+}
+
+func TestMoveRejectsWhenLackingPermissionOnDestination(t *testing.T) {
+	// 只在源节点 rd 上有权限，把 rd 的子节点塞进别人管的 sales 之下——必须拒绝。
+	// 否则一个部门管理员能把自己的子树挂到任何部门下面。
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	}))
+
+	rec := moveAs(t, api, u, "gw", strp("sales"))
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "permission_denied")
+}
+
+func TestMoveAllowsWhenHoldingBothEnds(t *testing.T) {
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("root"),
+	}))
+
+	rec := moveAs(t, api, u, "gw", strp("sales"))
+	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestMoveToRootRequiresGlobalGrant(t *testing.T) {
+	// 把节点移成根节点：目标为 nil，按边界规则要求全局授予。
+	api, _, rbac := visibilityFixture(t)
+	scoped := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("root"),
+	}))
+	require.Equal(t, http.StatusForbidden, moveAs(t, api, scoped, "gw", nil).Code)
+
+	global := &User{ID: "u2", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g2", UserID: "u2", RoleID: authz.RoleOrgAdmin,
+	}))
+	require.Equal(t, http.StatusNoContent, moveAs(t, api, global, "gw", nil).Code)
+}

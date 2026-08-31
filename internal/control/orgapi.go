@@ -149,6 +149,12 @@ func (a *OrgAPI) HandleRename(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleMove 把节点移到新的父节点之下。
+//
+// 中间件已经校验了源节点（路径里的 {id}）上的 org:write。
+// 这里必须再校验目标父节点——只查一端都能构造越权：
+// 只查源端，能把自己管的子树塞进别人的部门；
+// 只查目标端，能把别人的子树拽到自己名下。
 func (a *OrgAPI) HandleMove(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ParentID *string `json:"parent_id"`
@@ -157,6 +163,26 @@ func (a *OrgAPI) HandleMove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body", "请求体不是合法 JSON")
 		return
 	}
+
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+	allowed, err := a.resolver.Can(r.Context(), subjectOf(u), authz.PermOrgWrite, body.ParentID)
+	if err != nil {
+		if errors.Is(err, authz.ErrOrgNotFound) {
+			writeError(w, http.StatusNotFound, "org_not_found", "目标父节点不存在")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "permission_denied", "没有在目标父节点下添加子节点的权限")
+		return
+	}
+
 	if err := a.store.Move(r.Context(), r.PathValue("id"), body.ParentID); err != nil {
 		writeOrgError(w, err, "移动组织节点失败")
 		return
