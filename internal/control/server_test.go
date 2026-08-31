@@ -9,22 +9,27 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/softmatrix/airlock/internal/authz"
 )
 
 func newTestServer(t *testing.T) (*Server, *fakeUserStore, *fakeSessionStore) {
 	t.Helper()
 	users := newFakeUserStore()
 	sessions := newFakeSessionStore()
+	rbac := newFakeRBACStore()
 
 	auth := NewAuth(AuthDeps{
 		Users:       users,
 		Sessions:    sessions,
+		RBAC:        rbac,
 		LoginStates: newFakeLoginStateStore(),
 		OIDC:        &fakeOIDC{identity: &Identity{Subject: "s1", Email: "a@x.com"}},
 	})
 	srv := NewServer(ServerDeps{
-		Auth:   auth,
-		OrgAPI: NewOrgAPI(newFakeOrgStore(), &fakeSource{}),
+		Auth:     auth,
+		OrgAPI:   NewOrgAPI(newFakeOrgStore(), &fakeSource{}),
+		Resolver: authz.NewResolver(rbac),
 	})
 	return srv, users, sessions
 }
@@ -71,7 +76,7 @@ func TestServerOrgAPIRequiresSession(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-func TestServerOrgAPIAllowsAuthenticated(t *testing.T) {
+func TestServerOrgAPIDeniedWithoutPermission(t *testing.T) {
 	srv, users, sessions := newTestServer(t)
 	c := loggedIn(t, users, sessions)
 
@@ -80,10 +85,11 @@ func TestServerOrgAPIAllowsAuthenticated(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"登录不等于有权限——这正是 P1.2b 要建立的边界")
 }
 
-func TestServerOrgCreateRoute(t *testing.T) {
+func TestServerOrgCreateDeniedWithoutPermission(t *testing.T) {
 	srv, users, sessions := newTestServer(t)
 	c := loggedIn(t, users, sessions)
 
@@ -92,7 +98,7 @@ func TestServerOrgCreateRoute(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusCreated, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestServerWhoamiReturnsCurrentUser(t *testing.T) {
