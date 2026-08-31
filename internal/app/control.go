@@ -41,9 +41,21 @@ func RunControl() error {
 	loginStates := control.NewPostgresLoginStateStore(db)
 	orgs := control.NewPostgresOrgStore(db)
 
+	ctx := context.Background()
+	rbac := control.NewPostgresRBACStore(db)
+
+	// 内置角色与权限集以 Go 注册表为准，每次启动整体同步一次。
+	// 放在 CheckBootstrapConfig 之前——后者要数 platform_admin 授予，
+	// 依赖角色行已经存在。
+	if err := rbac.SyncBuiltinRoles(ctx); err != nil {
+		return err
+	}
+	if err := rbac.ValidatePermissions(ctx); err != nil {
+		return err
+	}
+
 	// 没有任何管理员且没配 bootstrap 时拒绝启动——
 	// 不允许出现「谁都能登、登进去就是管理员」的窗口期。
-	ctx := context.Background()
 	if err := control.CheckBootstrapConfig(ctx, users, cfg.BootstrapAdmin); err != nil {
 		return err
 	}
