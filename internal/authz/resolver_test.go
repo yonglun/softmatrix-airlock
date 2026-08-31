@@ -216,3 +216,93 @@ func TestCanUnknownTargetOrgReturnsError(t *testing.T) {
 	_, err := r.Can(context.Background(), activeSubject("u1"), PermOrgWrite, strp("nope"))
 	require.ErrorIs(t, err, ErrOrgNotFound)
 }
+
+func subjectWithOrg(id, orgID string) Subject {
+	return Subject{UserID: id, Active: true, PrimaryOrgID: strp(orgID)}
+}
+
+func TestImplicitDeveloperBaselineAppliesInOwnSubtree(t *testing.T) {
+	// 设计文档 D6：授予是三元组、每条只对一人生效，「给根节点授予开发者」
+	// 覆盖不了全公司。因此有归属的用户在自己子树内隐式拥有开发者权限。
+	st := newFakeStore()
+	seedTree(st)
+	r := NewResolver(st)
+
+	ok, err := r.Can(context.Background(), subjectWithOrg("u1", "rd"), PermOrgRead, strp("rd"))
+	require.NoError(t, err)
+	require.True(t, ok, "在自己归属节点上应有开发者基线")
+
+	ok, err = r.Can(context.Background(), subjectWithOrg("u1", "rd"), PermOrgRead, strp("gw"))
+	require.NoError(t, err)
+	require.True(t, ok, "基线覆盖归属节点的整棵子树")
+}
+
+func TestImplicitBaselineDoesNotEscapeOwnSubtree(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	r := NewResolver(st)
+
+	for _, node := range []string{"root", "rd2"} {
+		ok, err := r.Can(context.Background(), subjectWithOrg("u1", "rd"), PermOrgRead, strp(node))
+		require.NoError(t, err)
+		require.False(t, ok, "基线不该越出归属子树，%s 在子树外", node)
+	}
+}
+
+func TestImplicitBaselineGrantsOnlyDeveloperPermissions(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	r := NewResolver(st)
+
+	ok, err := r.Can(context.Background(), subjectWithOrg("u1", "rd"), PermOrgWrite, strp("rd"))
+	require.NoError(t, err)
+	require.False(t, ok, "基线只给开发者的权限集，不含写权限")
+}
+
+func TestImplicitBaselineSkippedWithoutPrimaryOrg(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	r := NewResolver(st)
+
+	ok, err := r.Can(context.Background(), activeSubject("u1"), PermOrgRead, strp("rd"))
+	require.NoError(t, err)
+	require.False(t, ok, "没有归属就没有基线")
+}
+
+func TestImplicitBaselineSkippedForNilTarget(t *testing.T) {
+	// 无目标节点时无从判断是否落在子树内，跳过基线。
+	// 这类操作按边界规则本就要求全局授予。
+	st := newFakeStore()
+	seedTree(st)
+	r := NewResolver(st)
+
+	ok, err := r.Can(context.Background(), subjectWithOrg("u1", "rd"), PermOrgRead, nil)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+func TestImplicitBaselineSkippedForInactiveSubject(t *testing.T) {
+	st := newFakeStore()
+	seedTree(st)
+	r := NewResolver(st)
+
+	s := subjectWithOrg("u1", "rd")
+	s.Active = false
+	ok, err := r.Can(context.Background(), s, PermOrgRead, strp("rd"))
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+func TestImplicitBaselineWithDanglingPrimaryOrgIsNotFatal(t *testing.T) {
+	// primary_org_id 指向一个查不到的节点时，判定不该整个报错——
+	// 基线拿不到就算了，显式授予仍应正常工作。
+	st := newFakeStore()
+	seedTree(st)
+	st.grants["u1"] = []Grant{{RoleID: RoleOrgAdmin, OrgID: strp("rd")}}
+	r := NewResolver(st)
+
+	s := Subject{UserID: "u1", Active: true, PrimaryOrgID: strp("ghost")}
+	ok, err := r.Can(context.Background(), s, PermOrgWrite, strp("rd"))
+	require.NoError(t, err)
+	require.True(t, ok, "显式授予不该被悬空的归属拖累")
+}

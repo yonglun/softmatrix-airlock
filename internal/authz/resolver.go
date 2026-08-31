@@ -99,7 +99,57 @@ func (r *Resolver) effectivePermissions(
 			held[p] = true
 		}
 	}
+
+	if err := r.applyImplicitBaseline(ctx, s, scope, target, held); err != nil {
+		return nil, err
+	}
 	return held, nil
+}
+
+// applyImplicitBaseline 叠加隐式开发者基线：有归属的活跃用户，
+// 在自己 primary_org_id 的子树内自动拥有开发者角色的权限。
+//
+// 为什么要隐式而不是给每人写一条授予：授予是 (用户, 角色, 节点) 三元组，
+// 每条只对一个人生效，「给根节点授予开发者」覆盖不了全公司——
+// 那样每个员工入职都要人工授予一次。
+//
+// 归属节点查不到时静默跳过而不是报错：悬空的归属只该让基线失效，
+// 不该把这个用户的显式授予一起拖垮。
+func (r *Resolver) applyImplicitBaseline(
+	ctx context.Context, s Subject, scope Scope, target *string, held map[string]bool,
+) error {
+	if s.PrimaryOrgID == nil || target == nil || scope != ScopeOrg {
+		return nil
+	}
+
+	homePath, err := r.store.OrgPath(ctx, *s.PrimaryOrgID)
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			return nil
+		}
+		return fmt.Errorf("查询归属节点路径失败: %w", err)
+	}
+	targetPath, err := r.store.OrgPath(ctx, *target)
+	if err != nil {
+		return fmt.Errorf("查询目标节点路径失败: %w", err)
+	}
+
+	// 加分隔符再比前缀，避免 /root/rd 把同前缀兄弟 /root/rd2 也算进子树。
+	if targetPath != homePath && !strings.HasPrefix(targetPath, homePath+"/") {
+		return nil
+	}
+
+	perms, err := r.store.PermissionsForRole(ctx, RoleDeveloper)
+	if err != nil {
+		return fmt.Errorf("查询开发者角色权限失败: %w", err)
+	}
+	for _, p := range perms {
+		if def, ok := Lookup(p); ok && def.Scope == ScopeGlobal {
+			continue // 基线绝不赋予全局权限
+		}
+		held[p] = true
+	}
+	return nil
 }
 
 // grantApplies 判断一条授予在本次判定中是否算数。
