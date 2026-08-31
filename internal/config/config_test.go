@@ -99,3 +99,40 @@ func TestReconcileIntervalAcceptsPositive(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 30*time.Second, cfg.ReconcileInterval)
 }
+
+func TestLiteLLMDefaults(t *testing.T) {
+	cfg, err := Load(func(string) string { return "" })
+	require.NoError(t, err)
+	require.Equal(t, "http://localhost:4000", cfg.LiteLLMBaseURL)
+	require.Empty(t, cfg.LiteLLMMasterKey, "未配置时为空，同步整体禁用")
+	require.Equal(t, 5*time.Minute, cfg.LiteLLMSyncInterval)
+}
+
+func TestLiteLLMSyncIntervalRejectsNonPositive(t *testing.T) {
+	// 与 RECONCILE_INTERVAL 同样的理由：time.NewTicker 在 d <= 0 时 panic，
+	// 且那个 panic 发生在没有 recover 的 goroutine 里，会崩掉整个进程。
+	env := map[string]string{"LITELLM_SYNC_INTERVAL": "0"}
+	_, err := Load(func(k string) string { return env[k] })
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "LITELLM_SYNC_INTERVAL")
+}
+
+func TestLiteLLMSyncIntervalAcceptsPositive(t *testing.T) {
+	env := map[string]string{"LITELLM_SYNC_INTERVAL": "30s"}
+	cfg, err := Load(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, cfg.LiteLLMSyncInterval)
+}
+
+func TestLiteLLMBaseURLIsSeparateFromEdgeUpstream(t *testing.T) {
+	// 不复用 EDGE_UPSTREAM_BASE_URL——那是 Edge 热路径的配置，
+	// 本阶段坚持对 Edge 零改动。
+	env := map[string]string{
+		"EDGE_UPSTREAM_BASE_URL": "http://edge-upstream:4000",
+		"LITELLM_BASE_URL":       "http://admin-api:4000",
+	}
+	cfg, err := Load(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	require.Equal(t, "http://edge-upstream:4000", cfg.UpstreamBaseURL)
+	require.Equal(t, "http://admin-api:4000", cfg.LiteLLMBaseURL)
+}
