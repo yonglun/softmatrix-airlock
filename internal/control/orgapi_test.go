@@ -564,3 +564,72 @@ func TestSetKeyHolderRejectsMalformedBody(t *testing.T) {
 	api.HandleSetKeyHolder(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// nudgeCount 数一个 Syncer 被 Nudge 了几次。
+func nudgeCount(s *Syncer) int { return len(s.trigger) }
+
+func TestCreateNudges(t *testing.T) {
+	api, store, _ := newOrgAPI(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+
+	rec := httptest.NewRecorder()
+	api.HandleCreate(rec, httptest.NewRequest(http.MethodPost, "/api/orgs",
+		strings.NewReader(`{"name":"研发中心"}`)))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	require.Equal(t, 1, nudgeCount(syncer), "建节点后应触发同步")
+}
+
+func TestRenameNudges(t *testing.T) {
+	api, store, _ := newOrgAPI(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+	require.NoError(t, store.Create(context.Background(), &Org{ID: "rd", Name: "研发中心"}))
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/orgs/rd/name",
+		strings.NewReader(`{"name":"技术中心"}`))
+	req.SetPathValue("id", "rd")
+	rec := httptest.NewRecorder()
+	api.HandleRename(rec, req)
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, 1, nudgeCount(syncer), "改名后应触发同步")
+}
+
+func TestMoveNudges(t *testing.T) {
+	// 移动会改变整棵子树的深度，进而改变哪些节点是 Organization——
+	// 但写路径只 Nudge 一下，由全量对账自己算清楚。
+	//
+	// 复用既有的 visibilityFixture + moveAs：HandleMove 要走真实的目标父节点
+	// 权限判定，自己拼 context 与授予很容易拼出一个假的 204。
+	api, store, rbac := visibilityFixture(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RolePlatformAdmin,
+	}))
+
+	rec := moveAs(t, api, u, "gw", strp("sales"))
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, 1, nudgeCount(syncer), "移动后应触发同步")
+}
+
+func TestFailedWriteDoesNotNudge(t *testing.T) {
+	// 写失败时不该触发同步——没有任何变化需要推送。
+	api, store, _ := newOrgAPI(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+
+	// 改一个不存在的节点。
+	req := httptest.NewRequest(http.MethodPatch, "/api/orgs/nope/name",
+		strings.NewReader(`{"name":"新名字"}`))
+	req.SetPathValue("id", "nope")
+	rec := httptest.NewRecorder()
+	api.HandleRename(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Zero(t, nudgeCount(syncer), "写失败不该触发同步")
+}

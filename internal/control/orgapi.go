@@ -137,6 +137,7 @@ func (a *OrgAPI) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeOrgError(w, err, "创建组织节点失败")
 		return
 	}
+	a.nudger.Nudge()
 	writeJSON(w, http.StatusCreated, o)
 }
 
@@ -157,6 +158,7 @@ func (a *OrgAPI) HandleRename(w http.ResponseWriter, r *http.Request) {
 		writeOrgError(w, err, "重命名失败")
 		return
 	}
+	a.nudger.Nudge()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -198,6 +200,7 @@ func (a *OrgAPI) HandleMove(w http.ResponseWriter, r *http.Request) {
 		writeOrgError(w, err, "移动组织节点失败")
 		return
 	}
+	a.nudger.Nudge()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -297,6 +300,7 @@ func (a *OrgAPI) HandleImportApply(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []DiffItem{}
 	}
+	a.nudger.Nudge()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"Created":      res.Created,
 		"Renamed":      res.Renamed,
