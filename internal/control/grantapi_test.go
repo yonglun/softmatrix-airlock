@@ -195,3 +195,108 @@ func TestListGrantsForOrg(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Len(t, got, 1)
 }
+
+func TestWhoamiReturnsProfileGrantsAndGlobalPermissions(t *testing.T) {
+	api, users, rbac := grantFixture(t)
+	ctx := context.Background()
+
+	u, err := users.Upsert(ctx, &User{
+		ExternalID: "s1", Email: "a@x.com", DisplayName: "阿三", Status: UserStatusActive,
+	})
+	require.NoError(t, err)
+	require.NoError(t, rbac.CreateGrant(ctx, RoleGrant{
+		ID: "g1", UserID: u.ID, RoleID: authz.RoleFinOps,
+	}))
+
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/whoami", nil), u)
+	rec := httptest.NewRecorder()
+	api.HandleWhoami(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got struct {
+		User              User        `json:"user"`
+		Grants            []RoleGrant `json:"grants"`
+		GlobalPermissions []string    `json:"global_permissions"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+
+	require.Equal(t, "a@x.com", got.User.Email)
+	require.Len(t, got.Grants, 1)
+	require.Contains(t, got.GlobalPermissions, authz.PermCostReadAll)
+	require.NotContains(t, got.GlobalPermissions, authz.PermPlatformConfigure)
+}
+
+func TestWhoamiGlobalPermissionsAreSorted(t *testing.T) {
+	api, users, rbac := grantFixture(t)
+	ctx := context.Background()
+	u, err := users.Upsert(ctx, &User{ExternalID: "s1", Email: "a@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.NoError(t, rbac.CreateGrant(ctx, RoleGrant{
+		ID: "g1", UserID: u.ID, RoleID: authz.RolePlatformAdmin,
+	}))
+
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/whoami", nil), u)
+	rec := httptest.NewRecorder()
+	api.HandleWhoami(rec, req)
+
+	var got struct {
+		GlobalPermissions []string `json:"global_permissions"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	for i := 1; i < len(got.GlobalPermissions); i++ {
+		require.Less(t, got.GlobalPermissions[i-1], got.GlobalPermissions[i],
+			"权限列表要排序，否则前端每次渲染顺序都不一样")
+	}
+}
+
+func TestAssignPrimaryOrgSetsAndClears(t *testing.T) {
+	api, users, rbac := grantFixture(t)
+	ctx := context.Background()
+
+	boss, err := users.Upsert(ctx, &User{ExternalID: "boss", Email: "b@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	target, err := users.Upsert(ctx, &User{ExternalID: "dev", Email: "d@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.NoError(t, rbac.CreateGrant(ctx, RoleGrant{
+		ID: "g0", UserID: boss.ID, RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	}))
+
+	assign := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut,
+			"/api/users/"+target.ID+"/primary-org", strings.NewReader(body))
+		req.SetPathValue("id", target.ID)
+		rec := httptest.NewRecorder()
+		api.HandleAssignPrimaryOrg(rec, asUser(req, boss))
+		return rec
+	}
+
+	require.Equal(t, http.StatusNoContent, assign(`{"org_id":"rd"}`).Code)
+	got, err := users.ByID(ctx, target.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.PrimaryOrgID)
+	require.Equal(t, "rd", *got.PrimaryOrgID)
+
+	require.Equal(t, http.StatusNoContent, assign(`{"org_id":null}`).Code)
+	got, err = users.ByID(ctx, target.ID)
+	require.NoError(t, err)
+	require.Nil(t, got.PrimaryOrgID)
+}
+
+func TestAssignPrimaryOrgUnknownUserReturns404(t *testing.T) {
+	api, users, rbac := grantFixture(t)
+	ctx := context.Background()
+	boss, err := users.Upsert(ctx, &User{ExternalID: "boss", Email: "b@x.com", Status: UserStatusActive})
+	require.NoError(t, err)
+	require.NoError(t, rbac.CreateGrant(ctx, RoleGrant{
+		ID: "g0", UserID: boss.ID, RoleID: authz.RolePlatformAdmin,
+	}))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/users/ghost/primary-org",
+		strings.NewReader(`{"org_id":"rd"}`))
+	req.SetPathValue("id", "ghost")
+	rec := httptest.NewRecorder()
+	api.HandleAssignPrimaryOrg(rec, asUser(req, boss))
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}

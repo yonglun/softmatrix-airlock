@@ -178,17 +178,10 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		{Pattern: "POST /auth/logout", Access: AccessPublic,
 			Handler: authH(func(a *Auth) http.HandlerFunc { return a.HandleLogout })},
 
-		// ---- 已登录即可：查看自己的身份（Task 16 切到 GrantAPI.HandleWhoami）----
+		// ---- 已登录即可：查看自己的身份 ----
 		{
 			Pattern: "GET /api/whoami", Access: AccessAuthenticated,
-			Handler: func(w http.ResponseWriter, r *http.Request) {
-				u, ok := UserFromContext(r.Context())
-				if !ok {
-					writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
-					return
-				}
-				writeJSON(w, http.StatusOK, u)
-			},
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleWhoami }),
 		},
 
 		// ---- 组织树 ----

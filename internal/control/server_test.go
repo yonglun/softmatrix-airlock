@@ -30,6 +30,7 @@ func newTestServer(t *testing.T) (*Server, *fakeUserStore, *fakeSessionStore) {
 	srv := NewServer(ServerDeps{
 		Auth:     auth,
 		OrgAPI:   NewOrgAPI(newFakeOrgStore(), &fakeSource{}, resolver),
+		GrantAPI: NewGrantAPI(users, rbac, resolver),
 		Resolver: resolver,
 	})
 	return srv, users, sessions

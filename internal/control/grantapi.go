@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 
 	"github.com/google/uuid"
 
@@ -158,9 +159,65 @@ func (a *GrantAPI) HandleDeleteGrant(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *GrantAPI) HandleWhoami(w http.ResponseWriter, r *http.Request)           { notImplemented(w) }
-func (a *GrantAPI) HandleAssignPrimaryOrg(w http.ResponseWriter, r *http.Request) { notImplemented(w) }
+// HandleWhoami 返回当前用户的画像、角色授予与全局权限集。
+//
+// P1.2a 时这里直接吐整个 User 结构（含 IsPlatformAdmin 布尔位）。
+// 那个布尔位已经删掉，改为返回授予与解析出的全局权限——
+// 对将来的控制台也更有用：它需要据此决定显示哪些工作台。
+func (a *GrantAPI) HandleWhoami(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
 
-func notImplemented(w http.ResponseWriter) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "该接口尚未实现")
+	grants, err := a.rbac.ListGrantsForUser(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询授予失败")
+		return
+	}
+	if grants == nil {
+		grants = []RoleGrant{}
+	}
+
+	perms, err := a.resolver.Permissions(r.Context(), subjectOf(u), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "解析权限失败")
+		return
+	}
+	global := make([]string, 0, len(perms))
+	for p := range perms {
+		global = append(global, p)
+	}
+	sort.Strings(global) // 顺序稳定，前端渲染才不会每次都跳
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":               u,
+		"grants":             grants,
+		"global_permissions": global,
+	})
+}
+
+// HandleAssignPrimaryOrg 指派或清除用户的组织归属。
+//
+// 归属决定两件事：该用户名下 Key 的默认计费归属（P1.3），
+// 以及隐式开发者基线的作用范围（他在自己归属子树内自动可读）。
+func (a *GrantAPI) HandleAssignPrimaryOrg(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		OrgID *string `json:"org_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "请求体不是合法 JSON")
+		return
+	}
+
+	if err := a.users.AssignPrimaryOrg(r.Context(), r.PathValue("id"), body.OrgID); err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, "user_not_found", "用户不存在")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "指派组织归属失败")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
