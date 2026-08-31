@@ -95,6 +95,7 @@ func RunControl() error {
 		Handler: control.NewServer(control.ServerDeps{
 			Auth:     auth,
 			OrgAPI:   control.NewOrgAPI(orgs, ldapSource, resolver),
+			GrantAPI: control.NewGrantAPI(users, rbac, resolver),
 			Resolver: resolver,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

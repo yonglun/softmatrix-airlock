@@ -13,6 +13,9 @@ lint:
 		|| { echo "违规：internal/control 依赖了 internal/edge"; exit 1; }
 	@! go list -deps ./internal/edge/... 2>/dev/null | grep -q 'airlock/internal/control' \
 		|| { echo "违规：internal/edge 依赖了 internal/control"; exit 1; }
+	@echo "检查 authz 包的独立性..."
+	@! go list -deps ./internal/authz/... 2>/dev/null | grep -qE 'airlock/internal/(control|edge)' \
+		|| { echo "违规：internal/authz 依赖了 internal/control 或 internal/edge"; exit 1; }
 	@echo "包边界检查通过"
 
 up:
