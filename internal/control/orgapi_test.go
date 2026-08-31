@@ -63,6 +63,17 @@ func (f *fakeOrgStore) Rename(_ context.Context, id, name string) error {
 	return nil
 }
 
+func (f *fakeOrgStore) SetKeyHolder(_ context.Context, id string, v bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.data[id]
+	if !ok {
+		return ErrOrgNotFound
+	}
+	o.IsKeyHolder = v
+	return nil
+}
+
 func (f *fakeOrgStore) Move(_ context.Context, id string, parentID *string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

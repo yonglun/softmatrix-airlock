@@ -111,6 +111,7 @@ type OrgStore interface {
 	Rename(ctx context.Context, id, name string) error
 	Move(ctx context.Context, id string, newParentID *string) error
 	Delete(ctx context.Context, id string) error
+	SetKeyHolder(ctx context.Context, id string, v bool) error
 	Children(ctx context.Context, parentID *string) ([]*Org, error)
 	Subtree(ctx context.Context, id string) ([]*Org, error)
 	ByExternal(ctx context.Context, source, externalID string) (*Org, error)

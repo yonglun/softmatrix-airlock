@@ -437,3 +437,31 @@ func TestOrgStoreKeyHolderDefaultsFalse(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, got.IsKeyHolder, "新建节点默认不是密钥边界")
 }
+
+func TestOrgStoreSetKeyHolder(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, s.Create(ctx, &Org{ID: "root", Name: "集团"}))
+
+	require.NoError(t, s.SetKeyHolder(ctx, "root", true))
+	got, err := s.Get(ctx, "root")
+	require.NoError(t, err)
+	require.True(t, got.IsKeyHolder)
+
+	require.NoError(t, s.SetKeyHolder(ctx, "root", false))
+	got, err = s.Get(ctx, "root")
+	require.NoError(t, err)
+	require.False(t, got.IsKeyHolder)
+}
+
+func TestOrgStoreSetKeyHolderUnknownNode(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+
+	err := s.SetKeyHolder(context.Background(), "nope", true)
+	require.ErrorIs(t, err, ErrOrgNotFound)
+}

@@ -81,6 +81,24 @@ func (s *postgresOrgStore) Rename(ctx context.Context, id, name string) error {
 	return nil
 }
 
+// SetKeyHolder 标记或取消该节点的密钥边界身份。
+func (s *postgresOrgStore) SetKeyHolder(ctx context.Context, id string, v bool) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE organizations SET is_key_holder = $1, updated_at = $2 WHERE id = $3`,
+		v, time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("更新密钥边界标记失败: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("读取影响行数失败: %w", err)
+	}
+	if n == 0 {
+		return ErrOrgNotFound
+	}
+	return nil
+}
+
 func (s *postgresOrgStore) Children(ctx context.Context, parentID *string) ([]*Org, error) {
 	var (
 		rows *sql.Rows
