@@ -156,6 +156,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.GrantAPI)
 	}
+	syncH := func(pick func(*SyncAPI) http.HandlerFunc) http.HandlerFunc {
+		if deps.SyncAPI == nil {
+			return stub
+		}
+		return pick(deps.SyncAPI)
+	}
 
 	return []Route{
 		// ---- 公开：无需登录 ----
@@ -209,6 +215,11 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Permission: authz.PermOrgDelete, Target: TargetFromPath("id"),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleDelete }),
 		},
+		{
+			Pattern: "PUT /api/orgs/{id}/key-holder", Access: AccessPermission,
+			Permission: authz.PermOrgWrite, Target: TargetFromPath("id"),
+			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleSetKeyHolder }),
+		},
 
 		// ---- 通讯录导入：作用面覆盖整棵树，要求全局授予 ----
 		{
@@ -247,6 +258,18 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "PUT /api/users/{id}/primary-org", Access: AccessPermission,
 			Permission: authz.PermMemberAssign, Target: TargetFromBody("org_id"),
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleAssignPrimaryOrg }),
+		},
+
+		// ---- LiteLLM 同步：平台级集成状态，只有平台管理员看得到 ----
+		{
+			Pattern: "GET /api/litellm/sync/status", Access: AccessPermission,
+			Permission: authz.PermPlatformConfigure, Target: TargetGlobal(),
+			Handler: syncH(func(s *SyncAPI) http.HandlerFunc { return s.HandleStatus }),
+		},
+		{
+			Pattern: "POST /api/litellm/sync", Access: AccessPermission,
+			Permission: authz.PermPlatformConfigure, Target: TargetGlobal(),
+			Handler: syncH(func(s *SyncAPI) http.HandlerFunc { return s.HandleTrigger }),
 		},
 	}
 }

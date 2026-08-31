@@ -63,6 +63,17 @@ func (f *fakeOrgStore) Rename(_ context.Context, id, name string) error {
 	return nil
 }
 
+func (f *fakeOrgStore) SetKeyHolder(_ context.Context, id string, v bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.data[id]
+	if !ok {
+		return ErrOrgNotFound
+	}
+	o.IsKeyHolder = v
+	return nil
+}
+
 func (f *fakeOrgStore) Move(_ context.Context, id string, parentID *string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -502,4 +513,141 @@ func TestImportApplySurfacesSourceFailure(t *testing.T) {
 
 	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
 	require.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+func TestSetKeyHolderMarksAndUnmarks(t *testing.T) {
+	api, store, _ := newOrgAPI(t)
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "gw", Name: "网关组"}))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{"is_key_holder":true}`))
+	req.SetPathValue("id", "gw")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	got, err := store.Get(ctx, "gw")
+	require.NoError(t, err)
+	require.True(t, got.IsKeyHolder)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{"is_key_holder":false}`))
+	req.SetPathValue("id", "gw")
+	rec = httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	got, err = store.Get(ctx, "gw")
+	require.NoError(t, err)
+	require.False(t, got.IsKeyHolder)
+}
+
+func TestSetKeyHolderUnknownNodeIs404(t *testing.T) {
+	api, _, _ := newOrgAPI(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/nope/key-holder",
+		strings.NewReader(`{"is_key_holder":true}`))
+	req.SetPathValue("id", "nope")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestSetKeyHolderRejectsMalformedBody(t *testing.T) {
+	api, _, _ := newOrgAPI(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{not json`))
+	req.SetPathValue("id", "gw")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// nudgeCount 数一个 Syncer 被 Nudge 了几次。
+func nudgeCount(s *Syncer) int { return len(s.trigger) }
+
+func TestCreateNudges(t *testing.T) {
+	api, store, _ := newOrgAPI(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+
+	rec := httptest.NewRecorder()
+	api.HandleCreate(rec, httptest.NewRequest(http.MethodPost, "/api/orgs",
+		strings.NewReader(`{"name":"研发中心"}`)))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	require.Equal(t, 1, nudgeCount(syncer), "建节点后应触发同步")
+}
+
+func TestRenameNudges(t *testing.T) {
+	api, store, _ := newOrgAPI(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+	require.NoError(t, store.Create(context.Background(), &Org{ID: "rd", Name: "研发中心"}))
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/orgs/rd/name",
+		strings.NewReader(`{"name":"技术中心"}`))
+	req.SetPathValue("id", "rd")
+	rec := httptest.NewRecorder()
+	api.HandleRename(rec, req)
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, 1, nudgeCount(syncer), "改名后应触发同步")
+}
+
+func TestMoveNudges(t *testing.T) {
+	// 移动会改变整棵子树的深度，进而改变哪些节点是 Organization——
+	// 但写路径只 Nudge 一下，由全量对账自己算清楚。
+	//
+	// 复用既有的 visibilityFixture + moveAs：HandleMove 要走真实的目标父节点
+	// 权限判定，自己拼 context 与授予很容易拼出一个假的 204。
+	api, store, rbac := visibilityFixture(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RolePlatformAdmin,
+	}))
+
+	rec := moveAs(t, api, u, "gw", strp("sales"))
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, 1, nudgeCount(syncer), "移动后应触发同步")
+}
+
+func TestFailedWriteDoesNotNudge(t *testing.T) {
+	// 写失败时不该触发同步——没有任何变化需要推送。
+	api, store, _ := newOrgAPI(t)
+	syncer := NewSyncer(SyncerDeps{Orgs: store, Admin: newFakeLiteLLM()})
+	api = api.WithNudger(syncer)
+
+	// 改一个不存在的节点。
+	req := httptest.NewRequest(http.MethodPatch, "/api/orgs/nope/name",
+		strings.NewReader(`{"name":"新名字"}`))
+	req.SetPathValue("id", "nope")
+	rec := httptest.NewRecorder()
+	api.HandleRename(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Zero(t, nudgeCount(syncer), "写失败不该触发同步")
+}
+
+func TestDeleteRejectsNodeWithChildrenSoCascadeIsSafe(t *testing.T) {
+	// 删除传播的安全性论证依赖这条守卫：被删节点一定没有子节点，
+	// 因此它下面不可能存在别的被标记节点，级联删除波及不到不该删的实体。
+	api, store, _ := newOrgAPI(t)
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "root", Name: "集团"}))
+	rootID := "root"
+	require.NoError(t, store.Create(ctx, &Org{ID: "child", Name: "子部门", ParentID: &rootID}))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/orgs/root", nil)
+	req.SetPathValue("id", "root")
+	rec := httptest.NewRecorder()
+	api.HandleDelete(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "org_has_children")
 }

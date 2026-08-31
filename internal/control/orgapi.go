@@ -17,10 +17,21 @@ type OrgAPI struct {
 	store    OrgStore
 	source   DirectorySource
 	resolver *authz.Resolver
+	nudger   *Syncer
 }
 
 func NewOrgAPI(store OrgStore, source DirectorySource, resolver *authz.Resolver) *OrgAPI {
 	return &OrgAPI{store: store, source: source, resolver: resolver}
+}
+
+// WithNudger 装上同步器。
+//
+// 不做成构造器参数是因为它是可选依赖（未配 LITELLM_MASTER_KEY 时同步整体禁用），
+// 而 NewOrgAPI 有 9 个调用点、其中 8 个在测试里——为一个可选依赖 churn 掉
+// 8 个测试文件不值得。nudger 为 nil 时 Nudge 是 no-op。
+func (a *OrgAPI) WithNudger(s *Syncer) *OrgAPI {
+	a.nudger = s
+	return a
 }
 
 // HandleList 返回调用者可见范围内的组织节点。
@@ -126,6 +137,7 @@ func (a *OrgAPI) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeOrgError(w, err, "创建组织节点失败")
 		return
 	}
+	a.nudger.Nudge()
 	writeJSON(w, http.StatusCreated, o)
 }
 
@@ -146,6 +158,7 @@ func (a *OrgAPI) HandleRename(w http.ResponseWriter, r *http.Request) {
 		writeOrgError(w, err, "重命名失败")
 		return
 	}
+	a.nudger.Nudge()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -187,14 +200,45 @@ func (a *OrgAPI) HandleMove(w http.ResponseWriter, r *http.Request) {
 		writeOrgError(w, err, "移动组织节点失败")
 		return
 	}
+	a.nudger.Nudge()
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *OrgAPI) HandleDelete(w http.ResponseWriter, r *http.Request) {
-	if err := a.store.Delete(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+
+	// 先读一份：删掉之后就查不到它的 path 与标记了，
+	// 而删除传播需要这两样来判断上游该删哪类实体。
+	o, err := a.store.Get(r.Context(), id)
+	if err != nil {
 		writeOrgError(w, err, "删除组织节点失败")
 		return
 	}
+	if err := a.store.Delete(r.Context(), id); err != nil {
+		writeOrgError(w, err, "删除组织节点失败")
+		return
+	}
+	a.nudger.DropNode(r.Context(), o)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleSetKeyHolder 标记或取消该节点的密钥边界身份。
+//
+// 标记后该节点会在下一轮同步里成为一个 LiteLLM Team；
+// 取消标记不会删掉已有的 Team——见设计文档 §6「一个刻意留下的不对称」。
+func (a *OrgAPI) HandleSetKeyHolder(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IsKeyHolder bool `json:"is_key_holder"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "请求体不是合法 JSON")
+		return
+	}
+	if err := a.store.SetKeyHolder(r.Context(), r.PathValue("id"), body.IsKeyHolder); err != nil {
+		writeOrgError(w, err, "设置密钥边界标记失败")
+		return
+	}
+	a.nudger.Nudge()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -266,6 +310,7 @@ func (a *OrgAPI) HandleImportApply(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []DiffItem{}
 	}
+	a.nudger.Nudge()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"Created":      res.Created,
 		"Renamed":      res.Renamed,

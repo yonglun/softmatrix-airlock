@@ -17,6 +17,7 @@ import (
 	"github.com/softmatrix/airlock/internal/authz"
 	"github.com/softmatrix/airlock/internal/config"
 	"github.com/softmatrix/airlock/internal/control"
+	"github.com/softmatrix/airlock/internal/litellm"
 	"github.com/softmatrix/airlock/migrations"
 )
 
@@ -90,12 +91,26 @@ func RunControl() error {
 
 	resolver := authz.NewResolver(rbac)
 
+	// LiteLLM 同步。未配置 master key 时 syncer 为 nil，
+	// OrgAPI 的 Nudge 与 DropNode 随之变成 no-op，状态接口回答「未启用」。
+	var syncer *control.Syncer
+	if cfg.LiteLLMMasterKey != "" {
+		syncer = control.NewSyncer(control.SyncerDeps{
+			Orgs: orgs,
+			Admin: litellm.New(litellm.Config{
+				BaseURL:   cfg.LiteLLMBaseURL,
+				MasterKey: cfg.LiteLLMMasterKey,
+			}),
+		})
+	}
+
 	srv := &http.Server{
 		Addr: cfg.ControlListenAddr,
 		Handler: control.NewServer(control.ServerDeps{
 			Auth:     auth,
-			OrgAPI:   control.NewOrgAPI(orgs, ldapSource, resolver),
+			OrgAPI:   control.NewOrgAPI(orgs, ldapSource, resolver).WithNudger(syncer),
 			GrantAPI: control.NewGrantAPI(users, rbac, resolver),
+			SyncAPI:  control.NewSyncAPI(syncer),
 			Resolver: resolver,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -123,6 +138,14 @@ func RunControl() error {
 		slog.Info("离职对账已启用", "interval", cfg.ReconcileInterval)
 	} else {
 		slog.Warn("未配置 LDAP_URL，离职对账未启用")
+	}
+
+	if syncer != nil {
+		go syncer.Run(runCtx, cfg.LiteLLMSyncInterval)
+		slog.Info("LiteLLM 同步已启用",
+			"base_url", cfg.LiteLLMBaseURL, "interval", cfg.LiteLLMSyncInterval)
+	} else {
+		slog.Warn("未配置 LITELLM_MASTER_KEY，LiteLLM 同步未启用")
 	}
 
 	errCh := make(chan error, 1)

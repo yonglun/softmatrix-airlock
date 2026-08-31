@@ -54,6 +54,8 @@ type Org struct {
 	Path           string
 	ExternalSource *string
 	ExternalID     *string
+	// IsKeyHolder 标记该节点是密钥与预算边界，决定它是否映射为 LiteLLM Team。
+	IsKeyHolder bool
 }
 
 // Identity 是从 IdP 换回来的身份信息。
@@ -109,6 +111,7 @@ type OrgStore interface {
 	Rename(ctx context.Context, id, name string) error
 	Move(ctx context.Context, id string, newParentID *string) error
 	Delete(ctx context.Context, id string) error
+	SetKeyHolder(ctx context.Context, id string, v bool) error
 	Children(ctx context.Context, parentID *string) ([]*Org, error)
 	Subtree(ctx context.Context, id string) ([]*Org, error)
 	ByExternal(ctx context.Context, source, externalID string) (*Org, error)
