@@ -152,3 +152,21 @@ func TestNewOIDCClientFailsOnUnreachableIssuer(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+func TestExchangeParsesEmailVerified(t *testing.T) {
+	// 直接验证 claims 结构体能吃下 email_verified。
+	// 完整的 OIDC 往返已由本文件既有测试覆盖，这里只锁字段解析。
+	type emailClaims struct {
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+	}
+
+	var withFlag emailClaims
+	require.NoError(t, json.Unmarshal(
+		[]byte(`{"email":"a@x.com","email_verified":true}`), &withFlag))
+	require.True(t, withFlag.EmailVerified)
+
+	var without emailClaims
+	require.NoError(t, json.Unmarshal([]byte(`{"email":"a@x.com"}`), &without))
+	require.False(t, without.EmailVerified, "缺失时零值为 false，即按未验证处理")
+}

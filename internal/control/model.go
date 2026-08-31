@@ -58,9 +58,10 @@ type Org struct {
 
 // Identity 是从 IdP 换回来的身份信息。
 type Identity struct {
-	Subject     string
-	Email       string
-	DisplayName string
+	Subject       string
+	Email         string
+	EmailVerified bool
+	DisplayName   string
 }
 
 var (
