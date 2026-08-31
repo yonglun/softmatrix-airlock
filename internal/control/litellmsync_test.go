@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -325,4 +326,43 @@ func TestReconcileAbortsEntirelyWhenListFails(t *testing.T) {
 	_, err := s.ReconcileOnce(context.Background())
 	require.Error(t, err)
 	require.Empty(t, admin.calls, "拉取失败时不该发出任何写请求")
+}
+
+func TestNudgeIsNonBlockingAndCoalesces(t *testing.T) {
+	// 容量 1 的 channel 把连续写操作合并成一轮——
+	// 10 次改名不该触发 10 轮全量对账。
+	s, _, _ := syncFixture(t)
+
+	for i := 0; i < 10; i++ {
+		s.Nudge() // 不得阻塞
+	}
+	require.Len(t, s.trigger, 1, "多次 Nudge 只积压一轮")
+}
+
+func TestNudgeOnNilSyncerIsNoOp(t *testing.T) {
+	// 未配置 LITELLM_MASTER_KEY 时同步整体禁用，OrgAPI 持有的是 nil。
+	var s *Syncer
+	require.NotPanics(t, func() { s.Nudge() })
+}
+
+func TestRunReconcilesOnNudgeThenExitsOnContextCancel(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		s.Run(ctx, time.Hour) // ticker 设得很长，确保这轮是 Nudge 触发的
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		return admin.orgCount() == 2
+	}, 2*time.Second, 10*time.Millisecond, "启动后应立即跑一轮")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 取消后 Run 应当退出")
+	}
 }

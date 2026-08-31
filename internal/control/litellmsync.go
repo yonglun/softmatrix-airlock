@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/softmatrix/airlock/internal/litellm"
 )
@@ -273,4 +274,52 @@ func (s *Syncer) ReconcileOnce(ctx context.Context) (SyncResult, error) {
 		return res, fmt.Errorf("本轮同步有 %d 项失败，将在下轮重试", len(res.Errors))
 	}
 	return res, nil
+}
+
+// Nudge 请求尽快跑一轮对账。非阻塞。
+//
+// trigger 容量为 1：已经有一轮待跑时，多余的触发直接丢弃。
+// 连续的组织树写操作因此被合并成一轮，而不是每次改名都触发一轮全量对账。
+//
+// 接收者为 nil 时是 no-op——未配置 LITELLM_MASTER_KEY 时同步整体禁用，
+// 调用方持有的就是 nil，不该为此在每个写操作里写一遍判空。
+func (s *Syncer) Nudge() {
+	if s == nil {
+		return
+	}
+	select {
+	case s.trigger <- struct{}{}:
+	default:
+	}
+}
+
+// Run 按 interval 周期对账，并响应 Nudge 触发，直到 ctx 被取消。
+//
+// 周期对账与写时同步跑的是同一个函数，没有第二条同步代码路径——
+// 这也顺带解决了「移动节点会改变整棵子树的深度」这个增量同步很难做对的场景。
+//
+// 单轮失败只记日志不退出：上游短暂不可用不该让同步循环整个停掉。
+func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		res, err := s.ReconcileOnce(ctx)
+		if err != nil {
+			slog.Error("LiteLLM 同步失败，将在下个周期重试", "err", err)
+		} else if res.OrgsCreated+res.OrgsUpdated+res.TeamsCreated+res.TeamsUpdated > 0 {
+			slog.Info("LiteLLM 同步完成",
+				"orgs_created", res.OrgsCreated, "orgs_updated", res.OrgsUpdated,
+				"teams_created", res.TeamsCreated, "teams_updated", res.TeamsUpdated,
+				"skipped", res.Skipped,
+				"extra_orgs", len(res.ExtraOrgs), "extra_teams", len(res.ExtraTeams))
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-s.trigger:
+		}
+	}
 }
