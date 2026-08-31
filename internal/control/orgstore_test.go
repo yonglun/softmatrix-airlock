@@ -423,3 +423,17 @@ func TestOrgStoreDeleteSucceedsAfterUnassigningUsers(t *testing.T) {
 
 	require.NoError(t, s.Delete(ctx, "rd"))
 }
+
+func TestOrgStoreKeyHolderDefaultsFalse(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+
+	o := &Org{ID: "root", Name: "集团"}
+	require.NoError(t, s.Create(ctx, o))
+
+	got, err := s.Get(ctx, "root")
+	require.NoError(t, err)
+	require.False(t, got.IsKeyHolder, "新建节点默认不是密钥边界")
+}

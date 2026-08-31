@@ -17,12 +17,12 @@ func NewPostgresOrgStore(db *sql.DB) OrgStore {
 	return &postgresOrgStore{db: db}
 }
 
-const orgColumns = `id, parent_id, name, path, external_source, external_id`
+const orgColumns = `id, parent_id, name, path, external_source, external_id, is_key_holder`
 
 func scanOrg(row interface{ Scan(...any) error }) (*Org, error) {
 	var o Org
 	if err := row.Scan(&o.ID, &o.ParentID, &o.Name, &o.Path,
-		&o.ExternalSource, &o.ExternalID); err != nil {
+		&o.ExternalSource, &o.ExternalID, &o.IsKeyHolder); err != nil {
 		return nil, err
 	}
 	return &o, nil

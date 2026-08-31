@@ -54,6 +54,8 @@ type Org struct {
 	Path           string
 	ExternalSource *string
 	ExternalID     *string
+	// IsKeyHolder 标记该节点是密钥与预算边界，决定它是否映射为 LiteLLM Team。
+	IsKeyHolder bool
 }
 
 // Identity 是从 IdP 换回来的身份信息。
