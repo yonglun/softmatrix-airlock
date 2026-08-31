@@ -633,3 +633,21 @@ func TestFailedWriteDoesNotNudge(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Zero(t, nudgeCount(syncer), "写失败不该触发同步")
 }
+
+func TestDeleteRejectsNodeWithChildrenSoCascadeIsSafe(t *testing.T) {
+	// 删除传播的安全性论证依赖这条守卫：被删节点一定没有子节点，
+	// 因此它下面不可能存在别的被标记节点，级联删除波及不到不该删的实体。
+	api, store, _ := newOrgAPI(t)
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "root", Name: "集团"}))
+	rootID := "root"
+	require.NoError(t, store.Create(ctx, &Org{ID: "child", Name: "子部门", ParentID: &rootID}))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/orgs/root", nil)
+	req.SetPathValue("id", "root")
+	rec := httptest.NewRecorder()
+	api.HandleDelete(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "org_has_children")
+}

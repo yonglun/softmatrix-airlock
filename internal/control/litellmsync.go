@@ -323,3 +323,35 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 		}
 	}
 }
+
+// DropNode 尽力删除某个节点在 LiteLLM 侧的对应实体。
+//
+// 只在用户显式删除节点时调用——对账本身绝不删除任何东西。
+// 调用点必须已经通过 OrgStore.Delete 的守卫（无子节点、无 Key、无归属用户），
+// 这正是删除 Organization 时的级联安全的前提：无子节点意味着它下面
+// 不可能存在别的被标记节点，级联波及不到不该删的实体。
+//
+// 尽力而为：失败只记日志。节点在本地已经删掉了，上游残留的实体
+// 会在状态接口里显示为「多出来的实体」，由人工决定怎么处理。
+func (s *Syncer) DropNode(ctx context.Context, o *Org) {
+	if s == nil || o == nil {
+		return
+	}
+	segs := pathSegments(o.Path)
+
+	// depth-2 节点删 Organization。若它同时是 key holder，
+	// 上游会级联带走同 ID 的 Team——正是我们想要的。
+	if len(segs) == 2 {
+		if err := s.deps.Admin.DeleteOrganization(ctx, o.ID); err != nil {
+			slog.Warn("删除 LiteLLM 组织失败，实体将残留在上游",
+				"org", o.ID, "err", err)
+		}
+		return
+	}
+	if o.IsKeyHolder {
+		if err := s.deps.Admin.DeleteTeam(ctx, o.ID); err != nil {
+			slog.Warn("删除 LiteLLM 团队失败，实体将残留在上游",
+				"team", o.ID, "err", err)
+		}
+	}
+}

@@ -366,3 +366,55 @@ func TestRunReconcilesOnNudgeThenExitsOnContextCancel(t *testing.T) {
 		t.Fatal("ctx 取消后 Run 应当退出")
 	}
 }
+
+func TestDropNodeRemovesOrganizationAndItsTeam(t *testing.T) {
+	// depth-2 且被标记的节点：LiteLLM 侧既有 Organization 又有 Team，
+	// 删 Organization 会级联带走 Team——而这两个本就都该删。
+	store := newFakeOrgStore()
+	ctx := context.Background()
+	root := "root"
+	require.NoError(t, store.Create(ctx, &Org{ID: "root", Name: "集团"}))
+	require.NoError(t, store.Create(ctx,
+		&Org{ID: "biz", Name: "业务线", ParentID: &root, IsKeyHolder: true}))
+	admin := newFakeLiteLLM()
+	s := NewSyncer(SyncerDeps{Orgs: store, Admin: admin})
+
+	_, err := s.ReconcileOnce(ctx)
+	require.NoError(t, err)
+	require.True(t, admin.hasOrg("biz"))
+	require.True(t, admin.hasTeam("biz"))
+
+	s.DropNode(ctx, &Org{ID: "biz", Path: "/root/biz", IsKeyHolder: true})
+	require.False(t, admin.hasOrg("biz"))
+	require.False(t, admin.hasTeam("biz"), "级联删除带走了同 ID 的 Team")
+}
+
+func TestDropNodeRemovesOnlyTeamForDeepKeyHolder(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	ctx := context.Background()
+	_, err := s.ReconcileOnce(ctx)
+	require.NoError(t, err)
+
+	s.DropNode(ctx, &Org{ID: "gw", Path: "/root/rd/plat/gw", IsKeyHolder: true})
+	require.False(t, admin.hasTeam("gw"))
+	require.True(t, admin.hasOrg("rd"), "只删团队，不碰它所属的组织")
+}
+
+func TestDropNodeIgnoresMiddleLayerNode(t *testing.T) {
+	// 中间层在 LiteLLM 侧没有任何实体，删它不该发出任何上游请求。
+	s, _, admin := syncFixture(t)
+	ctx := context.Background()
+	_, err := s.ReconcileOnce(ctx)
+	require.NoError(t, err)
+	admin.resetCalls()
+
+	s.DropNode(ctx, &Org{ID: "plat", Path: "/root/rd/plat"})
+	require.Empty(t, admin.callsSnapshot())
+}
+
+func TestDropNodeOnNilSyncerIsNoOp(t *testing.T) {
+	var s *Syncer
+	require.NotPanics(t, func() {
+		s.DropNode(context.Background(), &Org{ID: "x", Path: "/x"})
+	})
+}

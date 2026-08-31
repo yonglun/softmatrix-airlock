@@ -205,10 +205,20 @@ func (a *OrgAPI) HandleMove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *OrgAPI) HandleDelete(w http.ResponseWriter, r *http.Request) {
-	if err := a.store.Delete(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+
+	// 先读一份：删掉之后就查不到它的 path 与标记了，
+	// 而删除传播需要这两样来判断上游该删哪类实体。
+	o, err := a.store.Get(r.Context(), id)
+	if err != nil {
 		writeOrgError(w, err, "删除组织节点失败")
 		return
 	}
+	if err := a.store.Delete(r.Context(), id); err != nil {
+		writeOrgError(w, err, "删除组织节点失败")
+		return
+	}
+	a.nudger.DropNode(r.Context(), o)
 	w.WriteHeader(http.StatusNoContent)
 }
 
