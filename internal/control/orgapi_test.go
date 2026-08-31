@@ -251,9 +251,12 @@ func TestOrgAPIImportPreviewDoesNotMutate(t *testing.T) {
 }
 
 func TestOrgAPIImportApply(t *testing.T) {
-	api, store, _ := newOrgAPI(t)
+	api, store, src := newOrgAPI(t)
+	// Task 18 起，服务端自己拉通讯录重算差异，客户端只勾选 external_id——
+	// 这里要让 fakeSource 真的能拉到 ou=rd，勾选才有意义。
+	src.nodes = []ExternalOrgNode{{ExternalID: "ou=rd", Name: "研发中心"}}
 
-	body := `{"items":[{"Kind":"added","ExternalID":"ou=rd","Name":"研发中心"}]}`
+	body := `{"external_ids":["ou=rd"]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/orgs/import/apply", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	api.HandleImportApply(rec, req)
@@ -411,4 +414,92 @@ func TestMoveToRootRequiresGlobalGrant(t *testing.T) {
 		ID: "g2", UserID: "u2", RoleID: authz.RoleOrgAdmin,
 	}))
 	require.Equal(t, http.StatusNoContent, moveAs(t, api, global, "gw", nil).Code)
+}
+
+// applyAs 以某用户身份提交导入选择。
+func applyAs(t *testing.T, api *OrgAPI, u *User, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/import/apply", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.HandleImportApply(rec, asUser(req, u))
+	return rec
+}
+
+func TestImportApplyIgnoresClientSuppliedDiffContent(t *testing.T) {
+	// 复审第 3 条：客户端过去能完全控制 Kind/Name/OrgID/ParentExternalID，
+	// 从而在本地建出一个 external_id 由攻击者指定的节点，
+	// 让真实的目录节点之后永远被判定为「已存在」而不再导入。
+	// 现在服务端重新拉取并重算，客户端只能勾选。
+	store := newFakeOrgStore()
+	src := &fakeSource{nodes: []ExternalOrgNode{{ExternalID: "ou=rd", Name: "研发中心"}}}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	// 客户端伪造一条 LDAP 里根本不存在的项
+	rec := applyAs(t, api, u, `{"external_ids":["ou=finance"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var res ImportResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	require.Zero(t, res.Created, "LDAP 里不存在的项不得被创建")
+
+	_, err := store.ByExternal(context.Background(), "ldap", "ou=finance")
+	require.ErrorIs(t, err, ErrOrgNotFound)
+}
+
+func TestImportApplyAppliesOnlySelectedItems(t *testing.T) {
+	store := newFakeOrgStore()
+	src := &fakeSource{nodes: []ExternalOrgNode{
+		{ExternalID: "ou=rd", Name: "研发中心"},
+		{ExternalID: "ou=sales", Name: "销售部"},
+	}}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var res ImportResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	require.Equal(t, 1, res.Created)
+
+	_, err := store.ByExternal(context.Background(), "ldap", "ou=rd")
+	require.NoError(t, err)
+	_, err = store.ByExternal(context.Background(), "ldap", "ou=sales")
+	require.ErrorIs(t, err, ErrOrgNotFound, "没勾选的项不得被应用")
+}
+
+func TestImportApplyReturnsWhatWasActuallyApplied(t *testing.T) {
+	// 预览与应用之间目录可能变化。服务端按最新事实动作，
+	// 并把实际执行的差异项回传，让调用方看见发生了什么。
+	store := newFakeOrgStore()
+	src := &fakeSource{nodes: []ExternalOrgNode{{ExternalID: "ou=rd", Name: "研发中心"}}}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var res struct {
+		Created int        `json:"Created"`
+		Applied []DiffItem `json:"applied"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	require.Len(t, res.Applied, 1)
+	require.Equal(t, "ou=rd", res.Applied[0].ExternalID)
+	require.Equal(t, DiffAdded, res.Applied[0].Kind)
+}
+
+func TestImportApplySurfacesSourceFailure(t *testing.T) {
+	store := newFakeOrgStore()
+	src := &fakeSource{err: context.DeadlineExceeded}
+	rbac := newFakeRBACStore()
+	api := NewOrgAPI(store, src, authz.NewResolver(rbac))
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	rec := applyAs(t, api, u, `{"external_ids":["ou=rd"]}`)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
 }

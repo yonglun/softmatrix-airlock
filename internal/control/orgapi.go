@@ -217,20 +217,62 @@ func (a *OrgAPI) HandleImportPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleImportApply 应用用户确认过的差异项。
+// HandleImportApply 应用用户勾选的差异项。
+//
+// 客户端只提交「勾选了哪些 external_id」，服务端重新拉取通讯录、重新计算差异。
+// 这样客户端完全失去对 Kind / Name / OrgID / ParentExternalID 的控制权——
+// 否则可以伪造一条 LDAP 里不存在的 added 项，在本地建出一个 external_id
+// 由攻击者指定的节点，让真实的目录节点之后永远被判定为「已存在」而不再导入。
+//
+// 代价是多一次通讯录拉取。预览与应用之间目录发生变化时，服务端按最新事实动作
+// （更安全），并把实际执行的差异项回传给调用方。
 func (a *OrgAPI) HandleImportApply(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Items []DiffItem `json:"items"`
+		ExternalIDs []string `json:"external_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "请求体不是合法 JSON")
 		return
 	}
-	res, err := ApplyImport(r.Context(), a.store, a.source.Name(), body.Items)
+
+	remote, err := a.source.FetchOrgTree(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "import_failed", err.Error())
+		writeError(w, http.StatusBadGateway, "directory_unreachable", "读取通讯录失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	local, err := a.store.All(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询组织树失败")
+		return
+	}
+
+	selected := make(map[string]bool, len(body.ExternalIDs))
+	for _, id := range body.ExternalIDs {
+		selected[id] = true
+	}
+
+	var items []DiffItem
+	for _, it := range ComputeDiff(remote, local, a.source.Name()) {
+		if selected[it.ExternalID] {
+			items = append(items, it)
+		}
+	}
+
+	res, err := ApplyImport(r.Context(), a.store, a.source.Name(), items)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "import_failed", "应用导入变更失败")
+		return
+	}
+	if items == nil {
+		items = []DiffItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"Created":      res.Created,
+		"Renamed":      res.Renamed,
+		"MarkedOrphan": res.MarkedOrphan,
+		"Skipped":      res.Skipped,
+		"applied":      items,
+	})
 }
 
 // writeOrgError 把领域错误映射为合适的 HTTP 状态，
