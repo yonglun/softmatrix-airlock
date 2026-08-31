@@ -1,6 +1,8 @@
 package control
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -104,4 +106,109 @@ func TestDesiredEmptyTreeIsEmptyNotNil(t *testing.T) {
 	require.NotNil(t, got.Teams)
 	require.Empty(t, got.Orgs)
 	require.Empty(t, got.Teams)
+}
+
+// seedTree 把 tree() 那棵树按父子顺序写进 store。
+//
+// 走 Create 而不是直接塞内部 map：fakeOrgStore 带互斥锁，
+// 而 Task 9 的 Run 测试会在另一个 goroutine 里读它——直接写 map 会在 -race 下炸。
+// Create 自己按父节点算 path，因此这里只给 ParentID，不给 Path。
+func seedTree(t *testing.T, store *fakeOrgStore) {
+	t.Helper()
+	ctx := context.Background()
+	root, rd, plat := "root", "rd", "plat"
+	for _, o := range []*Org{
+		{ID: "root", Name: "集团"},
+		{ID: "rd", Name: "研发中心", ParentID: &root},
+		{ID: "rd2", Name: "销售部", ParentID: &root},
+		{ID: "plat", Name: "平台产品部", ParentID: &rd},
+		{ID: "gw", Name: "网关组", ParentID: &plat, IsKeyHolder: true},
+	} {
+		require.NoError(t, store.Create(ctx, o))
+	}
+}
+
+// syncFixture 造一个用上面那棵树当组织树的同步器。
+func syncFixture(t *testing.T) (*Syncer, *fakeOrgStore, *fakeLiteLLM) {
+	t.Helper()
+	store := newFakeOrgStore()
+	seedTree(t, store)
+	admin := newFakeLiteLLM()
+	return NewSyncer(SyncerDeps{Orgs: store, Admin: admin}), store, admin
+}
+
+func TestPlanReportsEverythingMissingOnEmptyUpstream(t *testing.T) {
+	s, _, _ := syncFixture(t)
+
+	plan, err := s.Plan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, plan.MissingOrgs, 2)
+	require.Len(t, plan.MissingTeams, 1)
+	require.Empty(t, plan.MismatchedOrgs)
+	require.Empty(t, plan.ExtraOrgs)
+}
+
+func TestPlanReportsNothingWhenInSync(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	admin.orgs["rd"] = litellm.Organization{ID: "rd", Alias: "研发中心"}
+	admin.orgs["rd2"] = litellm.Organization{ID: "rd2", Alias: "销售部"}
+	admin.teams["gw"] = litellm.Team{ID: "gw", Alias: "网关组", OrganizationID: strp("rd")}
+
+	plan, err := s.Plan(context.Background())
+	require.NoError(t, err)
+	require.True(t, plan.InSync(), "两侧一致时计划应为空")
+}
+
+func TestPlanDetectsAliasDrift(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	admin.orgs["rd"] = litellm.Organization{ID: "rd", Alias: "被人改过的名字"}
+	admin.orgs["rd2"] = litellm.Organization{ID: "rd2", Alias: "销售部"}
+	admin.teams["gw"] = litellm.Team{ID: "gw", Alias: "网关组", OrganizationID: strp("rd")}
+
+	plan, err := s.Plan(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []litellm.Organization{{ID: "rd", Alias: "研发中心"}}, plan.MismatchedOrgs)
+}
+
+func TestPlanDetectsTeamRehomed(t *testing.T) {
+	// 有人在 LiteLLM 侧把团队挂到了别的组织下，对账要把它改回来。
+	s, _, admin := syncFixture(t)
+	admin.orgs["rd"] = litellm.Organization{ID: "rd", Alias: "研发中心"}
+	admin.orgs["rd2"] = litellm.Organization{ID: "rd2", Alias: "销售部"}
+	admin.teams["gw"] = litellm.Team{ID: "gw", Alias: "网关组", OrganizationID: strp("rd2")}
+
+	plan, err := s.Plan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, plan.MismatchedTeams, 1)
+	require.Equal(t, "rd", *plan.MismatchedTeams[0].OrganizationID)
+}
+
+func TestPlanReportsExtraButNeverPlansDeletion(t *testing.T) {
+	// LiteLLM 侧多出来的实体只报告、不删除——删 Organization 会级联
+	// 删光其下全部 Team，而那些 Team 上可能绑着在用的 Key。
+	s, _, admin := syncFixture(t)
+	admin.orgs["stranger"] = litellm.Organization{ID: "stranger", Alias: "别人建的"}
+	admin.teams["stranger-team"] = litellm.Team{ID: "stranger-team", Alias: "别人的团队"}
+
+	plan, err := s.Plan(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"stranger"}, plan.ExtraOrgs)
+	require.Equal(t, []string{"stranger-team"}, plan.ExtraTeams)
+}
+
+func TestPlanAbortsWhenListOrganizationsFails(t *testing.T) {
+	// 绝不能因为「查不到」就当成「不存在」——那会对已存在的实体重复创建。
+	s, _, admin := syncFixture(t)
+	admin.listOrgsErr = errors.New("上游不可用")
+
+	_, err := s.Plan(context.Background())
+	require.Error(t, err)
+}
+
+func TestPlanAbortsWhenListTeamsFails(t *testing.T) {
+	s, _, admin := syncFixture(t)
+	admin.listTeamsErr = errors.New("上游不可用")
+
+	_, err := s.Plan(context.Background())
+	require.Error(t, err)
 }
