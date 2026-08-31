@@ -249,6 +249,8 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"POST /api/grants",
 		"DELETE /api/grants/{id}",
 		"PUT /api/users/{id}/primary-org",
+		"GET /api/litellm/sync/status",
+		"POST /api/litellm/sync",
 	} {
 		require.True(t, patterns[want], "路由表缺少 %s", want)
 	}
