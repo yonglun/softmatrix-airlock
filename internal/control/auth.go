@@ -35,6 +35,7 @@ type AuthDeps struct {
 	Sessions       SessionStore
 	LoginStates    LoginStateStore
 	OIDC           OIDCClient
+	RBAC           RBACStore
 	BootstrapAdmin string
 	// SecureCookie 在生产（HTTPS）下必须为 true；本地 HTTP 调试置 false。
 	SecureCookie bool

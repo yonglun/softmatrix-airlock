@@ -16,15 +16,14 @@ const (
 // User 是 Airlock 侧的用户。身份凭证由 IdP 持有，
 // 这里只镜像展示所需的最小画像 + Airlock 自己的归属与状态。
 type User struct {
-	ID              string
-	ExternalID      string // OIDC sub
-	Email           string
-	DisplayName     string
-	Status          string
-	IsPlatformAdmin bool
-	PrimaryOrgID    *string
-	LastLoginAt     *time.Time
-	ReconciledAt    *time.Time
+	ID           string
+	ExternalID   string // OIDC sub
+	Email        string
+	DisplayName  string
+	Status       string
+	PrimaryOrgID *string
+	LastLoginAt  *time.Time
+	ReconciledAt *time.Time
 }
 
 // Session 是一次登录会话。ID 是 token 的 sha256，不是 token 本身。
@@ -83,8 +82,8 @@ type UserStore interface {
 	Upsert(ctx context.Context, u *User) (*User, error)
 	ListActive(ctx context.Context) ([]*User, error)
 	MarkDisabled(ctx context.Context, userIDs []string) error
-	CountPlatformAdmins(ctx context.Context) (int, error)
-	SetPlatformAdmin(ctx context.Context, userID string, v bool) error
+	AssignPrimaryOrg(ctx context.Context, userID string, orgID *string) error
+	CountByPrimaryOrg(ctx context.Context, orgID string) (int, error)
 }
 
 type SessionStore interface {

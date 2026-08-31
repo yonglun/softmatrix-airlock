@@ -56,7 +56,7 @@ func RunControl() error {
 
 	// 没有任何管理员且没配 bootstrap 时拒绝启动——
 	// 不允许出现「谁都能登、登进去就是管理员」的窗口期。
-	if err := control.CheckBootstrapConfig(ctx, users, cfg.BootstrapAdmin); err != nil {
+	if err := control.CheckBootstrapConfig(ctx, rbac, cfg.BootstrapAdmin); err != nil {
 		return err
 	}
 
@@ -75,6 +75,7 @@ func RunControl() error {
 		Sessions:       sessions,
 		LoginStates:    loginStates,
 		OIDC:           oidcClient,
+		RBAC:           rbac,
 		BootstrapAdmin: cfg.BootstrapAdmin,
 		SecureCookie:   strings.HasPrefix(cfg.OIDCRedirectURL, "https://"),
 	})
