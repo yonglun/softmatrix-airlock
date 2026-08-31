@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/softmatrix/airlock/internal/authz"
 )
 
 // fakeOrgStore 是内存组织树，让 API 层可以脱离 Postgres 单测。
@@ -162,7 +164,8 @@ func newOrgAPI(t *testing.T) (*OrgAPI, *fakeOrgStore, *fakeSource) {
 	t.Helper()
 	store := newFakeOrgStore()
 	src := &fakeSource{}
-	return NewOrgAPI(store, src), store, src
+	resolver := authz.NewResolver(newFakeRBACStore())
+	return NewOrgAPI(store, src, resolver), store, src
 }
 
 func TestOrgAPICreate(t *testing.T) {
@@ -273,4 +276,83 @@ func TestOrgAPIImportPreviewSurfacesSourceFailure(t *testing.T) {
 	api.HandleImportPreview(rec, httptest.NewRequest(http.MethodGet, "/api/orgs/import/preview", nil))
 
 	require.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// visibilityFixture 造一棵树与一个带判定器的 OrgAPI。
+//
+//	root
+//	├── rd
+//	│   └── gw
+//	└── sales
+func visibilityFixture(t *testing.T) (*OrgAPI, *fakeOrgStore, *fakeRBACStore) {
+	t.Helper()
+	store := newFakeOrgStore()
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "root", Name: "集团"}))
+	require.NoError(t, store.Create(ctx, &Org{ID: "rd", Name: "研发中心", ParentID: strp("root")}))
+	require.NoError(t, store.Create(ctx, &Org{ID: "gw", Name: "网关组", ParentID: strp("rd")}))
+	require.NoError(t, store.Create(ctx, &Org{ID: "sales", Name: "销售部", ParentID: strp("root")}))
+
+	rbac := newFakeRBACStore()
+	rbac.setPath("root", "/root")
+	rbac.setPath("rd", "/root/rd")
+	rbac.setPath("gw", "/root/rd/gw")
+	rbac.setPath("sales", "/root/sales")
+
+	api := NewOrgAPI(store, &fakeSource{}, authz.NewResolver(rbac))
+	return api, store, rbac
+}
+
+// listAs 以某个用户身份调用 HandleList，返回可见节点名集合。
+func listAs(t *testing.T, api *OrgAPI, u *User) []string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/orgs", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey, u))
+	rec := httptest.NewRecorder()
+	api.HandleList(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got []Org
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	var names []string
+	for _, o := range got {
+		names = append(names, o.Name)
+	}
+	return names
+}
+
+func TestListShowsWholeTreeForGlobalReader(t *testing.T) {
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleAuditor,
+	}))
+
+	require.ElementsMatch(t, []string{"集团", "研发中心", "网关组", "销售部"}, listAs(t, api, u))
+}
+
+func TestListShowsSubtreeAndAncestorsForScopedGrant(t *testing.T) {
+	api, _, rbac := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g1", UserID: "u1", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	}))
+
+	// rd 及其子树 gw 是真实作用域；root 是祖先，给出来才能渲染成树。
+	// sales 与该用户无关，不该出现。
+	require.ElementsMatch(t, []string{"集团", "研发中心", "网关组"}, listAs(t, api, u))
+}
+
+func TestListShowsHomeSubtreeForImplicitBaseline(t *testing.T) {
+	api, _, _ := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive, PrimaryOrgID: strp("rd")}
+
+	require.ElementsMatch(t, []string{"集团", "研发中心", "网关组"}, listAs(t, api, u))
+}
+
+func TestListIsEmptyWithoutAnyReadAccess(t *testing.T) {
+	api, _, _ := visibilityFixture(t)
+	u := &User{ID: "u1", Status: UserStatusActive}
+
+	require.Empty(t, listAs(t, api, u))
 }

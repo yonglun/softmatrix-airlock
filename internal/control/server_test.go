@@ -26,10 +26,11 @@ func newTestServer(t *testing.T) (*Server, *fakeUserStore, *fakeSessionStore) {
 		LoginStates: newFakeLoginStateStore(),
 		OIDC:        &fakeOIDC{identity: &Identity{Subject: "s1", Email: "a@x.com"}},
 	})
+	resolver := authz.NewResolver(rbac)
 	srv := NewServer(ServerDeps{
 		Auth:     auth,
-		OrgAPI:   NewOrgAPI(newFakeOrgStore(), &fakeSource{}),
-		Resolver: authz.NewResolver(rbac),
+		OrgAPI:   NewOrgAPI(newFakeOrgStore(), &fakeSource{}, resolver),
+		Resolver: resolver,
 	})
 	return srv, users, sessions
 }

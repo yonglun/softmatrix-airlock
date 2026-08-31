@@ -14,6 +14,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/softmatrix/airlock/internal/authz"
 	"github.com/softmatrix/airlock/internal/config"
 	"github.com/softmatrix/airlock/internal/control"
 	"github.com/softmatrix/airlock/migrations"
@@ -87,11 +88,14 @@ func RunControl() error {
 		BaseDN:   os.Getenv("LDAP_BASE_DN"),
 	})
 
+	resolver := authz.NewResolver(rbac)
+
 	srv := &http.Server{
 		Addr: cfg.ControlListenAddr,
 		Handler: control.NewServer(control.ServerDeps{
-			Auth:   auth,
-			OrgAPI: control.NewOrgAPI(orgs, ldapSource),
+			Auth:     auth,
+			OrgAPI:   control.NewOrgAPI(orgs, ldapSource, resolver),
+			Resolver: resolver,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
