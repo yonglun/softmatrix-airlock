@@ -33,6 +33,7 @@ func testDB(t *testing.T) *sql.DB {
 func cleanTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 	for _, stmt := range []string{
+		`DELETE FROM role_grants`,
 		`DELETE FROM api_keys`,
 		`DELETE FROM sessions`,
 		`DELETE FROM login_states`,
