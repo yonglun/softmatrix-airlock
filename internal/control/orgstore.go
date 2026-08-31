@@ -217,7 +217,11 @@ func (s *postgresOrgStore) Move(ctx context.Context, id string, newParentID *str
 	return nil
 }
 
-// Delete 删除一个组织节点，但拒绝删除还有子节点或还有密钥的节点。
+// Delete 删除一个组织节点，但拒绝删除还有子节点、还有密钥、或还有归属用户的节点。
+//
+// 三项检查都要在应用层先做一遍：数据库层的外键是 ON DELETE RESTRICT，
+// 直接撞上去只会得到一个驱动错误，被映射成 500 而不是有意义的 409，
+// 调用方无法区分「服务器故障」和「合法的删除冲突」。
 //
 // 为什么只查 api_keys 而不查 ClickHouse 的用量记录：用量记录一定挂在某把
 // Key 上，而 Key 只会被吊销、永不物理删除——所以「有用量记录」必然蕴含
@@ -243,6 +247,15 @@ func (s *postgresOrgStore) Delete(ctx context.Context, id string) error {
 	}
 	if keyCount > 0 {
 		return ErrOrgHasKeys
+	}
+
+	var userCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM users WHERE primary_org_id = $1`, id).Scan(&userCount); err != nil {
+		return fmt.Errorf("检查归属用户失败: %w", err)
+	}
+	if userCount > 0 {
+		return ErrOrgHasUsers
 	}
 
 	if _, err := s.db.ExecContext(ctx,

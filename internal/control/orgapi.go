@@ -285,6 +285,8 @@ func writeOrgError(w http.ResponseWriter, err error, fallback string) {
 		writeError(w, http.StatusConflict, "org_has_children", "该节点下还有子节点，无法删除")
 	case errors.Is(err, ErrOrgHasKeys):
 		writeError(w, http.StatusConflict, "org_has_keys", "该节点下还有密钥，无法删除")
+	case errors.Is(err, ErrOrgHasUsers):
+		writeError(w, http.StatusConflict, "org_has_users", "该节点下还有归属用户，无法删除")
 	case errors.Is(err, ErrOrgCycle):
 		writeError(w, http.StatusConflict, "org_cycle", "不能把节点移动到自己的子树下")
 	default:
