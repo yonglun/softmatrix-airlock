@@ -17,6 +17,7 @@ import (
 	"github.com/softmatrix/airlock/internal/authz"
 	"github.com/softmatrix/airlock/internal/config"
 	"github.com/softmatrix/airlock/internal/control"
+	"github.com/softmatrix/airlock/internal/cryptobox"
 	"github.com/softmatrix/airlock/internal/litellm"
 	"github.com/softmatrix/airlock/migrations"
 )
@@ -104,6 +105,24 @@ func RunControl() error {
 		})
 	}
 
+	// 签发必须加密上游密钥。启动时响亮失败，而不是等第一次签发才 500——
+	// 与 CheckBootstrapConfig 的哲学一致。
+	if len(cfg.EncryptionKey) == 0 {
+		return errors.New("未配置 AIRLOCK_ENCRYPTION_KEY，无法签发密钥")
+	}
+	cipher, err := cryptobox.NewCipher(cfg.EncryptionKey)
+	if err != nil {
+		return err
+	}
+	keyStore := control.NewPostgresKeyStore(db)
+	issuer := control.NewKeyIssuer(control.KeyIssuerDeps{
+		Keys: keyStore, Orgs: orgs, Cipher: cipher,
+		Admin: litellm.New(litellm.Config{
+			BaseURL:   cfg.LiteLLMBaseURL,
+			MasterKey: cfg.LiteLLMMasterKey,
+		}),
+	})
+
 	srv := &http.Server{
 		Addr: cfg.ControlListenAddr,
 		Handler: control.NewServer(control.ServerDeps{
@@ -111,6 +130,7 @@ func RunControl() error {
 			OrgAPI:   control.NewOrgAPI(orgs, ldapSource, resolver).WithNudger(syncer),
 			GrantAPI: control.NewGrantAPI(users, rbac, resolver),
 			SyncAPI:  control.NewSyncAPI(syncer),
+			KeyAPI:   control.NewKeyAPI(issuer, keyStore, resolver),
 			Resolver: resolver,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -147,6 +167,28 @@ func RunControl() error {
 	} else {
 		slog.Warn("未配置 LITELLM_MASTER_KEY，LiteLLM 同步未启用")
 	}
+
+	// 滞留的 pending 是「上游调用与 MarkActive 之间崩掉」留下的残骸。
+	// 阈值取 10 分钟：远大于一次签发的正常耗时，不会误伤进行中的签发。
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			n, err := issuer.CleanupStalePending(runCtx, 10*time.Minute)
+			if err != nil {
+				slog.Error("清理滞留密钥失败", "err", err)
+				continue
+			}
+			if n > 0 {
+				slog.Warn("已清理滞留的待建密钥", "count", n)
+			}
+		}
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {

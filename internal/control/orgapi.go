@@ -234,7 +234,23 @@ func (a *OrgAPI) HandleSetKeyHolder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body", "请求体不是合法 JSON")
 		return
 	}
-	if err := a.store.SetKeyHolder(r.Context(), r.PathValue("id"), body.IsKeyHolder); err != nil {
+
+	id := r.PathValue("id")
+	// 只在「取消」时把关。不回收上游 Team（见设计文档 D7），所以取消本身
+	// 无副作用，但会留下「不再是密钥边界却挂着在用密钥」的矛盾状态。
+	if !body.IsKeyHolder {
+		n, err := a.store.CountLiveKeys(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "统计在用密钥失败")
+			return
+		}
+		if n > 0 {
+			writeError(w, http.StatusConflict, "org_has_live_keys",
+				"该节点下还有未吊销的密钥，请先吊销后再取消密钥边界标记")
+			return
+		}
+	}
+	if err := a.store.SetKeyHolder(r.Context(), id, body.IsKeyHolder); err != nil {
 		writeOrgError(w, err, "设置密钥边界标记失败")
 		return
 	}

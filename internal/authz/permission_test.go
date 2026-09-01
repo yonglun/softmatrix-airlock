@@ -43,10 +43,21 @@ func TestOrgPermissionsAreMarkedOrg(t *testing.T) {
 
 func TestAllIsSortedAndComplete(t *testing.T) {
 	all := All()
-	require.Len(t, all, 10, "权限总数与设计文档 §4 的清单一致")
+	require.Len(t, all, 12, "权限总数与设计文档 §4 的清单一致（P1.3a 新增 key:read / key:write）")
 
 	for i := 1; i < len(all); i++ {
 		require.Less(t, all[i-1].Key, all[i].Key,
 			"All() 必须按键排序——遍历 map 的顺序随机，不排序会让预置迁移每次产出不同顺序")
+	}
+}
+
+func TestKeyPermissionsAreOrgScoped(t *testing.T) {
+	// 签发绑定到具体节点（只能给 is_key_holder 的节点签发），
+	// 因此这两条必须是节点级——若成了全局权限，
+	// 「把 org_admin 授予在某节点上」就会变成全树签发权。
+	for _, k := range []string{PermKeyRead, PermKeyWrite} {
+		def, ok := Lookup(k)
+		require.True(t, ok, "%s 未注册", k)
+		require.Equal(t, ScopeOrg, def.Scope)
 	}
 }

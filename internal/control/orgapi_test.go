@@ -16,12 +16,13 @@ import (
 
 // fakeOrgStore 是内存组织树，让 API 层可以脱离 Postgres 单测。
 type fakeOrgStore struct {
-	mu   sync.Mutex
-	data map[string]*Org
+	mu       sync.Mutex
+	data     map[string]*Org
+	liveKeys map[string]int
 }
 
 func newFakeOrgStore() *fakeOrgStore {
-	return &fakeOrgStore{data: map[string]*Org{}}
+	return &fakeOrgStore{data: map[string]*Org{}, liveKeys: map[string]int{}}
 }
 
 func (f *fakeOrgStore) Create(_ context.Context, o *Org) error {
@@ -72,6 +73,13 @@ func (f *fakeOrgStore) SetKeyHolder(_ context.Context, id string, v bool) error 
 	}
 	o.IsKeyHolder = v
 	return nil
+}
+
+// liveKeys 供测试直接设定「该节点下有几把在用密钥」。
+func (f *fakeOrgStore) CountLiveKeys(_ context.Context, orgID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.liveKeys[orgID], nil
 }
 
 func (f *fakeOrgStore) Move(_ context.Context, id string, parentID *string) error {
@@ -650,4 +658,52 @@ func TestDeleteRejectsNodeWithChildrenSoCascadeIsSafe(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, rec.Code)
 	require.Contains(t, rec.Body.String(), "org_has_children")
+}
+
+func TestUnmarkKeyHolderRejectedWhenLiveKeysExist(t *testing.T) {
+	// 不回收 Team 意味着取消标记本身无副作用，但会留下
+	// 「此节点不再是密钥边界，却挂着在用密钥」这种自相矛盾的状态。
+	api, store, _ := newOrgAPI(t)
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "gw", Name: "网关组", IsKeyHolder: true}))
+	store.liveKeys["gw"] = 2
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{"is_key_holder":false}`))
+	req.SetPathValue("id", "gw")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "org_has_live_keys")
+}
+
+func TestUnmarkKeyHolderAllowedWhenNoLiveKeys(t *testing.T) {
+	api, store, _ := newOrgAPI(t)
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "gw", Name: "网关组", IsKeyHolder: true}))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{"is_key_holder":false}`))
+	req.SetPathValue("id", "gw")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestMarkKeyHolderNeverBlockedByExistingKeys(t *testing.T) {
+	// 守卫只针对「取消」。标记本身永远允许。
+	api, store, _ := newOrgAPI(t)
+	ctx := context.Background()
+	require.NoError(t, store.Create(ctx, &Org{ID: "gw", Name: "网关组"}))
+	store.liveKeys["gw"] = 5
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orgs/gw/key-holder",
+		strings.NewReader(`{"is_key_holder":true}`))
+	req.SetPathValue("id", "gw")
+	rec := httptest.NewRecorder()
+	api.HandleSetKeyHolder(rec, req)
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
 }

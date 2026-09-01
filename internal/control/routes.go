@@ -162,6 +162,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.SyncAPI)
 	}
+	keyH := func(pick func(*KeyAPI) http.HandlerFunc) http.HandlerFunc {
+		if deps.KeyAPI == nil {
+			return stub
+		}
+		return pick(deps.KeyAPI)
+	}
 
 	return []Route{
 		// ---- 公开：无需登录 ----
@@ -270,6 +276,24 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "POST /api/litellm/sync", Access: AccessPermission,
 			Permission: authz.PermPlatformConfigure, Target: TargetGlobal(),
 			Handler: syncH(func(s *SyncAPI) http.HandlerFunc { return s.HandleTrigger }),
+		},
+
+		// ---- 虚拟密钥 ----
+		{
+			Pattern: "POST /api/keys", Access: AccessPermission,
+			Permission: authz.PermKeyWrite, Target: TargetFromBody("org_id"),
+			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleIssue }),
+		},
+		{
+			Pattern: "GET /api/orgs/{id}/keys", Access: AccessPermission,
+			Permission: authz.PermKeyRead, Target: TargetFromPath("id"),
+			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleList }),
+		},
+		{
+			// 路径里只有密钥 ID，中间件拿不到它所属的节点。
+			// 判定下沉到 HandleRevoke 自己做，与 DELETE /api/grants/{id} 同理。
+			Pattern: "DELETE /api/keys/{id}", Access: AccessAuthenticated,
+			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevoke }),
 		},
 	}
 }

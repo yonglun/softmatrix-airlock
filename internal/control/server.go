@@ -12,6 +12,7 @@ type ServerDeps struct {
 	OrgAPI   *OrgAPI
 	GrantAPI *GrantAPI
 	SyncAPI  *SyncAPI
+	KeyAPI   *KeyAPI
 	Resolver *authz.Resolver
 	// Routes 供测试注入自定义路由表；为空时用 DefaultRoutes。
 	Routes []Route

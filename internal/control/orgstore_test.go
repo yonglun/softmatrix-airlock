@@ -465,3 +465,38 @@ func TestOrgStoreSetKeyHolderUnknownNode(t *testing.T) {
 	err := s.SetKeyHolder(context.Background(), "nope", true)
 	require.ErrorIs(t, err, ErrOrgNotFound)
 }
+
+func TestOrgStoreCountLiveKeys(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+	require.NoError(t, s.Create(ctx, &Org{ID: "gw", Name: "网关组"}))
+	uid := seedUserID(t, db, "u1")
+
+	insert := func(id, status string) {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO api_keys (id, key_hash, key_prefix, org_id, user_id, upstream_key_enc, status)
+			VALUES ($1,$2,'ak-xxx','gw',$3,'enc',$4)`, id, "h"+id, uid, status)
+		require.NoError(t, err)
+	}
+	insert("k1", "active")
+	insert("k2", "pending")
+	insert("k3", "revoked")
+
+	n, err := s.CountLiveKeys(ctx, "gw")
+	require.NoError(t, err)
+	require.Equal(t, 2, n, "只数 active 与 pending，已吊销的不算")
+}
+
+func TestOrgStoreCountLiveKeysEmpty(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+	ctx := context.Background()
+	require.NoError(t, s.Create(ctx, &Org{ID: "gw", Name: "网关组"}))
+
+	n, err := s.CountLiveKeys(ctx, "gw")
+	require.NoError(t, err)
+	require.Zero(t, n)
+}

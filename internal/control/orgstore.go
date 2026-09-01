@@ -99,6 +99,19 @@ func (s *postgresOrgStore) SetKeyHolder(ctx context.Context, id string, v bool) 
 	return nil
 }
 
+// CountLiveKeys 统计该节点下仍然「活着」的密钥（active 与 pending）。
+//
+// 已吊销的不算：它们既不能调用，也不阻止节点取消密钥边界身份。
+func (s *postgresOrgStore) CountLiveKeys(ctx context.Context, orgID string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM api_keys WHERE org_id = $1 AND status IN ('active','pending')`,
+		orgID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("统计在用密钥失败: %w", err)
+	}
+	return n, nil
+}
+
 func (s *postgresOrgStore) Children(ctx context.Context, parentID *string) ([]*Org, error) {
 	var (
 		rows *sql.Rows
