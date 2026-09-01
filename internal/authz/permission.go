@@ -33,6 +33,7 @@ const (
 	PermGrantWrite   = "grant:write"
 	PermKeyRead      = "key:read"
 	PermKeyWrite     = "key:write"
+	PermKeyRequest   = "key:request"
 
 	PermAuditRead         = "audit:read"
 	PermCostReadAll       = "cost:read_all"
@@ -61,6 +62,7 @@ var registry = map[string]Permission{
 	PermGrantWrite:   {Key: PermGrantWrite, Scope: ScopeOrg, Desc: "授予与撤销角色"},
 	PermKeyRead:      {Key: PermKeyRead, Scope: ScopeOrg, Desc: "查看节点下签发的密钥"},
 	PermKeyWrite:     {Key: PermKeyWrite, Scope: ScopeOrg, Desc: "签发与吊销密钥"},
+	PermKeyRequest:   {Key: PermKeyRequest, Scope: ScopeOrg, Desc: "发起密钥与提额申请"},
 
 	PermAuditRead:         {Key: PermAuditRead, Scope: ScopeGlobal, Desc: "查看审计日志"},
 	PermCostReadAll:       {Key: PermCostReadAll, Scope: ScopeGlobal, Desc: "查看全公司成本"},

@@ -43,7 +43,7 @@ func TestOrgPermissionsAreMarkedOrg(t *testing.T) {
 
 func TestAllIsSortedAndComplete(t *testing.T) {
 	all := All()
-	require.Len(t, all, 12, "权限总数与设计文档 §4 的清单一致（P1.3a 新增 key:read / key:write）")
+	require.Len(t, all, 13, "权限总数与设计文档 §4 的清单一致（P1.3b 新增 key:request）")
 
 	for i := 1; i < len(all); i++ {
 		require.Less(t, all[i-1].Key, all[i].Key,
@@ -60,4 +60,12 @@ func TestKeyPermissionsAreOrgScoped(t *testing.T) {
 		require.True(t, ok, "%s 未注册", k)
 		require.Equal(t, ScopeOrg, def.Scope)
 	}
+}
+
+func TestKeyRequestIsOrgScoped(t *testing.T) {
+	// 申请绑定到具体节点（只能在自己归属子树内申请），
+	// 因此必须是节点级；成了全局权限就等于全树申请权。
+	def, ok := Lookup(PermKeyRequest)
+	require.True(t, ok, "%s 未注册", PermKeyRequest)
+	require.Equal(t, ScopeOrg, def.Scope)
 }

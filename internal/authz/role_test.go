@@ -59,7 +59,32 @@ func TestOrgAdminHasNoGlobalPermission(t *testing.T) {
 func TestDeveloperIsReadOnlyOnOrgTree(t *testing.T) {
 	// 开发者是隐式基线角色——任何有归属的用户都自动拥有它。
 	// 它的权限集必须极小，否则等于给全公司开了后门。
-	require.Equal(t, []string{PermOrgRead}, roleByID(t, RoleDeveloper).Permissions)
+	// key:request 只是「发起申请」，本身不改变任何东西，真正的动作要审批。
+	perms := roleByID(t, RoleDeveloper).Permissions
+	require.Equal(t, []string{PermKeyRequest, PermOrgRead}, perms)
+	for _, forbidden := range []string{
+		PermOrgWrite, PermOrgDelete, PermOrgImport,
+		PermKeyWrite, PermGrantWrite, PermMemberAssign,
+	} {
+		require.NotContains(t, perms, forbidden, "开发者基线不该含 %s", forbidden)
+	}
+}
+
+func TestDeveloperCanRequestKeys(t *testing.T) {
+	// 隐式开发者基线（设计文档 P1.2b D6）因此让任何有归属的员工
+	// 都能在自己归属子树内发起申请——「入职即可申请」。
+	require.Contains(t, roleByID(t, RoleDeveloper).Permissions, PermKeyRequest)
+}
+
+func TestDeveloperPermissionsAreSubsetOfOrgAdmin(t *testing.T) {
+	// CanGrant 只允许授予「自己权限集的子集」。开发者是隐式基线角色，
+	// 组织管理员必须能把它授出去，所以前者必须是后者的子集。
+	// 给开发者加权限时若忘了同步组织管理员，组织管理员就再也不能
+	// 授予开发者了——这条测试把那个耦合摆到明面上。
+	admin := roleByID(t, RoleOrgAdmin).Permissions
+	for _, p := range roleByID(t, RoleDeveloper).Permissions {
+		require.Contains(t, admin, p, "组织管理员缺少开发者的 %s", p)
+	}
 }
 
 func TestSecurityOfficerAndAuditorAreCurrentlyIdentical(t *testing.T) {
