@@ -33,6 +33,10 @@ func testDB(t *testing.T) *sql.DB {
 func cleanTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 	for _, stmt := range []string{
+		// notifications 外键指向 requests，requests 指向 users/organizations/api_keys，
+		// 因此这两张必须排在 api_keys 与 users 之前删，否则外键违反。
+		`DELETE FROM notifications`,
+		`DELETE FROM requests`,
 		`DELETE FROM role_grants`,
 		`DELETE FROM api_keys`,
 		`DELETE FROM sessions`,
