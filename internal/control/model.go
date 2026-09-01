@@ -81,6 +81,12 @@ var (
 	ErrGrantNotFound      = errors.New("角色授予不存在")
 	ErrAPIKeyNotFound     = errors.New("密钥不存在")
 	ErrOrgNotKeyHolder    = errors.New("该节点不是密钥边界")
+
+	ErrRequestNotFound    = errors.New("申请单不存在")
+	ErrRequestNotPending  = errors.New("申请单不处于待审批状态")
+	ErrRequestNotApproved = errors.New("申请单未处于已批准状态")
+	ErrNotRequester       = errors.New("只有申请人本人可以领取")
+	ErrPermissionDenied   = errors.New("没有执行该操作的权限")
 )
 
 type UserStore interface {
@@ -196,4 +202,94 @@ type LiteLLMKeyAdmin interface {
 	KeyExists(ctx context.Context, key string) (bool, error)
 	BlockKey(ctx context.Context, key string) error
 	DeleteKey(ctx context.Context, key string) error
+}
+
+// 申请单的 kind 与 status 取值。与迁移里的 CHECK 约束一一对应。
+const (
+	RequestKindNewKey    = "new_key"
+	RequestKindQuotaBump = "quota_bump"
+
+	RequestStatusPending  = "pending"
+	RequestStatusRejected = "rejected"
+	RequestStatusApproved = "approved"
+	RequestStatusExecuted = "executed"
+	RequestStatusFailed   = "failed"
+)
+
+// 通知事件。与 notifications.event 的 CHECK 约束一一对应。
+const (
+	NotifyEventSubmitted = "submitted"
+	NotifyEventApproved  = "approved"
+	NotifyEventRejected  = "rejected"
+	NotifyEventExecuted  = "executed"
+	NotifyEventReclaimed = "reclaimed"
+)
+
+// Request 是一张申请单。它同时就是这条流程的审计轨迹：
+// 谁申请、谁审批、何时、执行结果、何时回收，全在这一行里。
+type Request struct {
+	ID          string
+	Kind        string
+	Status      string
+	RequesterID string
+	OrgID       string
+	Reason      string
+
+	KeyName *string
+	Models  []string
+
+	TargetKeyID   *string
+	BumpToBudget  *float64
+	BumpExpiresAt *time.Time
+	PrevBudget    *float64
+	ReclaimedAt   *time.Time
+
+	DecidedBy   *string
+	DecidedAt   *time.Time
+	ExecutedAt  *time.Time
+	IssuedKeyID *string
+	LastError   *string
+	Attempts    int
+	CreatedAt   time.Time
+}
+
+type RequestStore interface {
+	Create(ctx context.Context, r *Request) error
+	Get(ctx context.Context, id string) (*Request, error)
+	ListByRequester(ctx context.Context, userID string) ([]*Request, error)
+	// Decide 只在 pending 时生效，否则返回 ErrRequestNotPending。
+	Decide(ctx context.Context, id, status, decidedBy string) error
+	// MarkExecuted 只在 approved 时生效，否则返回 ErrRequestNotApproved。
+	MarkExecuted(ctx context.Context, id string, issuedKeyID *string, prevBudget *float64) error
+	MarkFailed(ctx context.Context, id, reason string) error
+	RecordAttempt(ctx context.Context, id, lastErr string) error
+	ListApprovedBumps(ctx context.Context) ([]*Request, error)
+	ListExpiredBumps(ctx context.Context, now time.Time) ([]*Request, error)
+	MarkReclaimed(ctx context.Context, id string) error
+}
+
+// Notification 是 outbox 里的一条待投递通知。
+type Notification struct {
+	ID        string
+	RequestID string
+	Event     string
+	Channel   string
+	Recipient string
+	Subject   string
+	Body      string
+	Status    string
+	Attempts  int
+	LastError *string
+	SentAt    *time.Time
+	CreatedAt time.Time
+}
+
+type NotificationStore interface {
+	Enqueue(ctx context.Context, n *Notification) error
+	ListPending(ctx context.Context, limit int) ([]*Notification, error)
+	MarkSent(ctx context.Context, id string) error
+	// RecordFailure 计一次失败但保持 pending，下一轮继续重试。
+	RecordFailure(ctx context.Context, id, lastErr string) error
+	// MarkFailed 终止重试，留待人工查看。
+	MarkFailed(ctx context.Context, id, lastErr string) error
 }
