@@ -16,12 +16,13 @@ import (
 
 // fakeOrgStore 是内存组织树，让 API 层可以脱离 Postgres 单测。
 type fakeOrgStore struct {
-	mu   sync.Mutex
-	data map[string]*Org
+	mu       sync.Mutex
+	data     map[string]*Org
+	liveKeys map[string]int
 }
 
 func newFakeOrgStore() *fakeOrgStore {
-	return &fakeOrgStore{data: map[string]*Org{}}
+	return &fakeOrgStore{data: map[string]*Org{}, liveKeys: map[string]int{}}
 }
 
 func (f *fakeOrgStore) Create(_ context.Context, o *Org) error {
@@ -72,6 +73,13 @@ func (f *fakeOrgStore) SetKeyHolder(_ context.Context, id string, v bool) error 
 	}
 	o.IsKeyHolder = v
 	return nil
+}
+
+// liveKeys 供测试直接设定「该节点下有几把在用密钥」。
+func (f *fakeOrgStore) CountLiveKeys(_ context.Context, orgID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.liveKeys[orgID], nil
 }
 
 func (f *fakeOrgStore) Move(_ context.Context, id string, parentID *string) error {
