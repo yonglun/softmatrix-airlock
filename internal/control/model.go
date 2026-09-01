@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/softmatrix/airlock/internal/litellm"
 )
 
 const (
@@ -185,4 +187,13 @@ type KeyStore interface {
 	Delete(ctx context.Context, id string) error
 	// ListStalePending 返回滞留超过 olderThan 的 pending 密钥。
 	ListStalePending(ctx context.Context, olderThan time.Duration) ([]*APIKey, error)
+}
+
+// LiteLLMKeyAdmin 是签发所需的上游密钥能力。
+// 定义在 control 侧、由 internal/litellm 实现——依赖方向单向。
+type LiteLLMKeyAdmin interface {
+	GenerateKey(ctx context.Context, k litellm.Key) error
+	KeyExists(ctx context.Context, key string) (bool, error)
+	BlockKey(ctx context.Context, key string) error
+	DeleteKey(ctx context.Context, key string) error
 }
