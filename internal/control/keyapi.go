@@ -78,7 +78,7 @@ func (a *KeyAPI) HandleIssue(w http.ResponseWriter, r *http.Request) {
 		OrgID: body.OrgID, UserID: body.UserID, Name: body.Name,
 		Models: *body.Models, MaxBudget: body.MaxBudget,
 		BudgetDuration: body.BudgetDuration,
-		RPMLimit: body.RPMLimit, TPMLimit: body.TPMLimit,
+		RPMLimit:       body.RPMLimit, TPMLimit: body.TPMLimit,
 		ExpiresAt: body.ExpiresAt,
 	})
 	if err != nil {

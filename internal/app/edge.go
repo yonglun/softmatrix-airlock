@@ -17,6 +17,7 @@ import (
 
 	"github.com/softmatrix/airlock/internal/apikey"
 	"github.com/softmatrix/airlock/internal/config"
+	"github.com/softmatrix/airlock/internal/cryptobox"
 	"github.com/softmatrix/airlock/internal/edge"
 	"github.com/softmatrix/airlock/internal/pricing"
 	"github.com/softmatrix/airlock/internal/usage"
@@ -49,9 +50,15 @@ func RunEdge() error {
 	writer := usage.NewBatchWriter(sink, 200, 2*time.Second)
 	defer writer.Close()
 
-	// P1.1 阶段密钥与价格从内存加载，由控制面在 P1.2/P1.3 接管为数据库来源。
-	// 这里保留接口，切换时只换实现。
-	keys := apikey.NewMemoryStore(nil)
+	// 密钥改为每请求查库（P1.3a）。价格仍是内存态，留待后续接管。
+	if len(cfg.EncryptionKey) == 0 {
+		return errors.New("未配置 AIRLOCK_ENCRYPTION_KEY，无法解密上游密钥")
+	}
+	cipher, err := cryptobox.NewCipher(cfg.EncryptionKey)
+	if err != nil {
+		return err
+	}
+	keys := apikey.NewPostgresStore(db, cipher)
 	prices, err := pricing.NewMemoryTable(nil)
 	if err != nil {
 		return err
