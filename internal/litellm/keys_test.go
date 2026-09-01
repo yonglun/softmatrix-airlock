@@ -87,3 +87,67 @@ func TestGenerateKeyPropagatesAPIError(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	require.Equal(t, http.StatusBadRequest, apiErr.Status)
 }
+
+func TestKeyExistsTrueOn200(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/key/info", r.URL.Path)
+		require.Equal(t, "sk-x", r.URL.Query().Get("key"))
+		_, _ = w.Write([]byte(`{"key":"sk-x","info":{}}`))
+	})
+
+	ok, err := c.KeyExists(context.Background(), "sk-x")
+	require.NoError(t, err)
+	require.True(t, ok)
+}
+
+func TestKeyExistsFalseOn404(t *testing.T) {
+	// pending 清理靠这个判断上游到底建没建成，
+	// 因此 404 必须是「确定不存在」而不是错误。
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"not found"}}`))
+	})
+
+	ok, err := c.KeyExists(context.Background(), "sk-x")
+	require.NoError(t, err, "404 是确定的答案，不是故障")
+	require.False(t, ok)
+}
+
+func TestKeyExistsErrorOnServerFailure(t *testing.T) {
+	// 500 必须返回错误——把它当成「不存在」会让清理逻辑
+	// 误判并删掉本地行，正好制造出无主凭据。
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	_, err := c.KeyExists(context.Background(), "sk-x")
+	require.Error(t, err)
+}
+
+func TestBlockKey(t *testing.T) {
+	var body map[string]any
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/key/block", r.URL.Path)
+		raw, _ := io.ReadAll(r.Body)
+		require.NoError(t, json.Unmarshal(raw, &body))
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	require.NoError(t, c.BlockKey(context.Background(), "sk-x"))
+	require.Equal(t, "sk-x", body["key"])
+}
+
+func TestDeleteKey(t *testing.T) {
+	var body map[string]any
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/key/delete", r.URL.Path)
+		raw, _ := io.ReadAll(r.Body)
+		require.NoError(t, json.Unmarshal(raw, &body))
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	require.NoError(t, c.DeleteKey(context.Background(), "sk-x"))
+	require.Equal(t, []any{"sk-x"}, body["keys"])
+}
