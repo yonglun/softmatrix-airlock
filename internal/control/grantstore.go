@@ -193,6 +193,18 @@ func (s *postgresRBACStore) ListGrantsForOrg(ctx context.Context, orgID string) 
 	return scanGrants(rows)
 }
 
+// ListGlobalGrants 列出全部全局授予（org_id 为 NULL）。
+// 审批人查找需要它：全局授予对任何节点都算数，而 ListGrantsForOrg 查不到。
+func (s *postgresRBACStore) ListGlobalGrants(ctx context.Context) ([]RoleGrant, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+grantColumns+` FROM role_grants WHERE org_id IS NULL ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("查询全局授予失败: %w", err)
+	}
+	defer rows.Close()
+	return scanGrants(rows)
+}
+
 // CountGlobalGrantsOfRole 只数全局授予。
 // CheckBootstrapConfig 用它判断「系统里有没有管理员」——
 // 节点级的平台管理员授予不算，因为它拿不到全局能力。

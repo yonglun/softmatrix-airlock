@@ -163,6 +163,9 @@ type RBACStore interface {
 	ListGrantsForUser(ctx context.Context, userID string) ([]RoleGrant, error)
 	ListGrantsForOrg(ctx context.Context, orgID string) ([]RoleGrant, error)
 	CountGlobalGrantsOfRole(ctx context.Context, roleID string) (int, error)
+	// ListGlobalGrants 列出全部全局授予（org_id 为 NULL）。
+	// 审批人查找需要它——全局授予对任何节点都算数。
+	ListGlobalGrants(ctx context.Context) ([]RoleGrant, error)
 }
 
 // APIKey 是控制面视角的一把虚拟密钥。UpstreamKeyEnc 是加密后的上游密钥。
