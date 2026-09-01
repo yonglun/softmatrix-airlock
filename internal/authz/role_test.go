@@ -78,3 +78,9 @@ func TestBuiltinRolesAreSorted(t *testing.T) {
 			"BuiltinRoles() 必须按 ID 排序，保证预置迁移的顺序稳定")
 	}
 }
+
+func TestOrgAdminCanManageKeys(t *testing.T) {
+	perms := roleByID(t, RoleOrgAdmin).Permissions
+	require.Contains(t, perms, PermKeyRead)
+	require.Contains(t, perms, PermKeyWrite)
+}
