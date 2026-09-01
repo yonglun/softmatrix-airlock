@@ -102,7 +102,7 @@ func (i *KeyIssuer) Issue(ctx context.Context, req IssueRequest) (string, *APIKe
 		Key: upstreamKey, KeyAlias: k.ID, TeamID: &req.OrgID,
 		Models: req.Models, MaxBudget: req.MaxBudget,
 		BudgetDuration: req.BudgetDuration,
-		RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,
+		RPMLimit:       req.RPMLimit, TPMLimit: req.TPMLimit,
 		Duration: relativeDuration(req.ExpiresAt, time.Now()),
 	}); err != nil {
 		i.cleanup(ctx, k.ID, upstreamKey)
@@ -154,4 +154,56 @@ func (i *KeyIssuer) cleanup(ctx context.Context, id, upstreamKey string) {
 	if err := i.deps.Keys.Delete(ctx, id); err != nil {
 		slog.Warn("删除待建密钥行失败", "key_id", id, "err", err)
 	}
+}
+
+// Revoke 吊销一把密钥。
+//
+// 本地先行：Edge 读的是本地状态，改完下一个请求就会被拒。
+// 上游 block 是凭据泄漏时的第二道防线，尽力而为——
+// 它失败不该让吊销整体失败，否则上游抖动期间就吊销不掉任何密钥。
+func (i *KeyIssuer) Revoke(ctx context.Context, id string) error {
+	k, err := i.deps.Keys.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := i.deps.Keys.Revoke(ctx, id); err != nil {
+		return err
+	}
+
+	upstreamKey, err := i.deps.Cipher.Decrypt(k.UpstreamKeyEnc)
+	if err != nil {
+		slog.Warn("解密上游密钥失败，跳过上游封禁", "key_id", id, "err", err)
+		return nil
+	}
+	if err := i.deps.Admin.BlockKey(ctx, upstreamKey); err != nil {
+		slog.Warn("封禁上游密钥失败，本地已吊销、Edge 已拒绝该密钥",
+			"key_id", id, "err", err)
+	}
+	return nil
+}
+
+// CleanupStalePending 清理滞留的 pending 密钥，返回清理条数。
+//
+// 这些是「进程在上游调用与 MarkActive 之间崩掉」留下的残骸。
+// 用户当时已经收到错误、并不知道这把密钥存在，所以是清理而不是补成 active——
+// 补成 active 等于凭空多出一把没人知道却能用的密钥。
+func (i *KeyIssuer) CleanupStalePending(ctx context.Context, olderThan time.Duration) (int, error) {
+	stale, err := i.deps.Keys.ListStalePending(ctx, olderThan)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, k := range stale {
+		upstreamKey, err := i.deps.Cipher.Decrypt(k.UpstreamKeyEnc)
+		if err != nil {
+			slog.Warn("解密待建密钥失败，跳过", "key_id", k.ID, "err", err)
+			continue
+		}
+		before := k.ID
+		i.cleanup(ctx, k.ID, upstreamKey)
+		if _, err := i.deps.Keys.Get(ctx, before); err != nil {
+			n++ // 行确实被清掉了才算数
+		}
+	}
+	return n, nil
 }

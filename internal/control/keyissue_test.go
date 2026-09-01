@@ -208,3 +208,92 @@ func TestCleanupSkipsDeleteWhenUpstreamAbsent(t *testing.T) {
 	_, err := keys.Get(ctx, "k-absent")
 	require.ErrorIs(t, err, ErrAPIKeyNotFound, "本地行仍应被清掉")
 }
+
+func TestRevokeMarksLocalFirstThenBlocksUpstream(t *testing.T) {
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "测试", Models: []string{},
+	})
+	require.NoError(t, err)
+	admin.resetCalls()
+
+	require.NoError(t, iss.Revoke(ctx, k.ID))
+
+	stored, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", stored.Status, "本地状态是主闸门，必须先改")
+
+	calls := admin.callsSnapshot()
+	require.Len(t, calls, 1)
+	require.Contains(t, calls[0], "block:", "上游用 block 而非 delete，保住审计关联")
+}
+
+func TestRevokeSucceedsEvenIfUpstreamBlockFails(t *testing.T) {
+	// 上游 block 是第二道防线。它失败不该让吊销整体失败——
+	// 本地已标记 revoked，Edge 下一个请求就会拒绝该密钥。
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "测试", Models: []string{},
+	})
+	require.NoError(t, err)
+	admin.blockErr = errUpstreamDown
+
+	require.NoError(t, iss.Revoke(ctx, k.ID), "上游失败不影响吊销生效")
+
+	stored, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", stored.Status)
+}
+
+func TestRevokeUnknownKey(t *testing.T) {
+	iss, _, _, _, _, _ := issuerFixture(t)
+	err := iss.Revoke(context.Background(), "nope")
+	require.ErrorIs(t, err, ErrAPIKeyNotFound)
+}
+
+func TestCleanupStalePendingRemovesStuckRows(t *testing.T) {
+	iss, _, admin, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+
+	// 模拟「上游建成了、但进程在 MarkActive 之前崩了」。
+	k := sampleKey("k-crash", "h-crash")
+	k.UserID = uid
+	upstream := "sk-airlock-crashcase"
+	enc, err := testCipher(t).Encrypt(upstream)
+	require.NoError(t, err)
+	k.UpstreamKeyEnc = enc
+	require.NoError(t, keys.CreatePending(ctx, k))
+	require.NoError(t, admin.GenerateKey(ctx, litellm.Key{Key: upstream, Models: []string{}}))
+
+	_, err = db.ExecContext(ctx,
+		`UPDATE api_keys SET created_at = now() - interval '1 hour' WHERE id='k-crash'`)
+	require.NoError(t, err)
+
+	n, err := iss.CleanupStalePending(ctx, 10*time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	require.False(t, admin.has(upstream), "上游残骸应被删除")
+	_, err = keys.Get(ctx, "k-crash")
+	require.ErrorIs(t, err, ErrAPIKeyNotFound, "本地行应被清掉")
+}
+
+func TestCleanupStalePendingIgnoresFreshRows(t *testing.T) {
+	iss, _, _, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+
+	k := sampleKey("k-fresh", "h-fresh")
+	k.UserID = uid
+	require.NoError(t, keys.CreatePending(ctx, k))
+
+	n, err := iss.CleanupStalePending(ctx, 10*time.Minute)
+	require.NoError(t, err)
+	require.Zero(t, n, "刚创建的 pending 可能正在签发中，绝不能碰")
+
+	_, err = keys.Get(ctx, "k-fresh")
+	require.NoError(t, err)
+}
