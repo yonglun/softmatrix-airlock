@@ -77,6 +77,8 @@ var (
 	ErrOrgHasUsers        = errors.New("组织节点下还有归属用户")
 	ErrRoleNotFound       = errors.New("角色不存在")
 	ErrGrantNotFound      = errors.New("角色授予不存在")
+	ErrAPIKeyNotFound     = errors.New("密钥不存在")
+	ErrOrgNotKeyHolder    = errors.New("该节点不是密钥边界")
 )
 
 type UserStore interface {
@@ -151,4 +153,34 @@ type RBACStore interface {
 	ListGrantsForUser(ctx context.Context, userID string) ([]RoleGrant, error)
 	ListGrantsForOrg(ctx context.Context, orgID string) ([]RoleGrant, error)
 	CountGlobalGrantsOfRole(ctx context.Context, roleID string) (int, error)
+}
+
+// APIKey 是控制面视角的一把虚拟密钥。UpstreamKeyEnc 是加密后的上游密钥。
+type APIKey struct {
+	ID             string
+	KeyHash        string
+	KeyPrefix      string
+	OrgID          string
+	UserID         string
+	Name           string
+	UpstreamKeyEnc string
+	Status         string
+	Models         []string
+	MaxBudget      *float64
+	BudgetDuration *string
+	RPMLimit       *int
+	TPMLimit       *int
+	ExpiresAt      *time.Time
+	CreatedAt      time.Time
+}
+
+type KeyStore interface {
+	CreatePending(ctx context.Context, k *APIKey) error
+	MarkActive(ctx context.Context, id string) error
+	Get(ctx context.Context, id string) (*APIKey, error)
+	ListByOrg(ctx context.Context, orgID string) ([]*APIKey, error)
+	Revoke(ctx context.Context, id string) error
+	Delete(ctx context.Context, id string) error
+	// ListStalePending 返回滞留超过 olderThan 的 pending 密钥。
+	ListStalePending(ctx context.Context, olderThan time.Duration) ([]*APIKey, error)
 }
