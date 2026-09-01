@@ -106,6 +106,41 @@ func (a *KeyAPI) HandleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// HandleRevoke 吊销一把密钥。
+//
+// 权限判定下沉到这里：路径里只有密钥 ID，中间件拿不到它所属的节点，
+// 与 DELETE /api/grants/{id} 是同一类例外。
+func (a *KeyAPI) HandleRevoke(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	k, err := a.keys.Get(r.Context(), id)
+	if err != nil {
+		writeKeyError(w, err, "吊销密钥失败")
+		return
+	}
+
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+	allowed, err := a.resolver.Can(r.Context(), subjectOf(u), authz.PermKeyWrite, &k.OrgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "permission_denied", "没有吊销该密钥的权限")
+		return
+	}
+
+	if err := a.issuer.Revoke(r.Context(), id); err != nil {
+		writeKeyError(w, err, "吊销密钥失败")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // writeKeyError 把密钥相关的领域错误映射为合适的状态码。
 func writeKeyError(w http.ResponseWriter, err error, fallback string) {
 	switch {

@@ -20,6 +20,10 @@ func keyAPIFixture(t *testing.T) (api *KeyAPI, orgs *fakeOrgStore, admin *fakeKe
 	t.Helper()
 	iss, orgs, admin, keys, _, uid := issuerFixture(t)
 	rbac = newFakeRBACStore()
+	// resolver.Can 靠 OrgPath 算祖先链，fake RBAC store 不会自动跟着
+	// fakeOrgStore 的树走，必须显式登记——否则 HandleRevoke 的权限判定
+	// 直接因 authz.ErrOrgNotFound 拿到 500，而不是被测的业务状态码。
+	rbac.setPath("gw", "/gw")
 	return NewKeyAPI(iss, keys, authz.NewResolver(rbac)), orgs, admin, keys, rbac, uid
 }
 
@@ -119,4 +123,67 @@ func TestListKeysEmptyIsArrayNotNull(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, "[]", rec.Body.String())
+}
+
+// revokeAs 以一个持有全局 platform_admin 的用户身份调吊销。
+// HandleRevoke 自己做权限判定，因此必须带上用户上下文与授予，
+// 否则拿到的是 500（上下文缺用户）而不是被测的业务状态码。
+func revokeAs(t *testing.T, api *KeyAPI, rbac *fakeRBACStore, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	u := &User{ID: "u1", Status: UserStatusActive}
+	_ = rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-key-" + id, UserID: "u1", RoleID: authz.RolePlatformAdmin,
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/api/keys/"+id, nil)
+	req.SetPathValue("id", id)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey, u))
+	rec := httptest.NewRecorder()
+	api.HandleRevoke(rec, req)
+	return rec
+}
+
+func TestRevokeAPI(t *testing.T) {
+	api, _, _, keys, rbac, uid := keyAPIFixture(t)
+	rec := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"测试","models":[]}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	require.Equal(t, http.StatusNoContent, revokeAs(t, api, rbac, created.ID).Code)
+
+	stored, err := keys.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", stored.Status)
+}
+
+func TestRevokeAPIUnknownKeyIs404(t *testing.T) {
+	api, _, _, _, rbac, _ := keyAPIFixture(t)
+	require.Equal(t, http.StatusNotFound, revokeAs(t, api, rbac, "nope").Code)
+}
+
+func TestRevokeAPIWithoutPermissionIs403(t *testing.T) {
+	// 判定下沉到处理器意味着它必须自己拦住无授予的调用者——
+	// 中间件在这条路由上只校验了「已登录」。
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	rec := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"测试","models":[]}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	// 不给任何授予。
+	u := &User{ID: "nobody", Status: UserStatusActive}
+	req := httptest.NewRequest(http.MethodDelete, "/api/keys/"+created.ID, nil)
+	req.SetPathValue("id", created.ID)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey, u))
+	rec2 := httptest.NewRecorder()
+	api.HandleRevoke(rec2, req)
+
+	require.Equal(t, http.StatusForbidden, rec2.Code)
+	require.Contains(t, rec2.Body.String(), "permission_denied")
 }
