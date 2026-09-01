@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/softmatrix/airlock/internal/cryptobox"
+	"github.com/softmatrix/airlock/internal/litellm"
 )
 
 func testCipher(t *testing.T) *cryptobox.Cipher {
@@ -134,4 +135,76 @@ func decryptForTest(t *testing.T, enc string) string {
 	plain, err := testCipher(t).Decrypt(enc)
 	require.NoError(t, err)
 	return plain
+}
+
+func TestIssueUpstreamFailureLeavesNoTrace(t *testing.T) {
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	admin.generateErr = errUpstreamDown
+
+	_, _, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "测试", Models: []string{},
+	})
+	require.Error(t, err)
+
+	list, err := keys.ListByOrg(ctx, "gw")
+	require.NoError(t, err)
+	require.Empty(t, list, "失败后不该留下任何本地行")
+}
+
+func TestCleanupDeletesUpstreamBeforeLocalRow(t *testing.T) {
+	// 顺序颠倒会正好制造出无主凭据：本地行一删，
+	// 上游那把仍然能用的密钥就再也没人知道了。
+	iss, _, admin, _, _, _ := issuerFixture(t)
+	ctx := context.Background()
+
+	// 让上游「建成功了」但 MarkActive 失败，从而触发 cleanup。
+	// 用一个已被删除的 store 制造 MarkActive 失败不现实，
+	// 因此直接验证 cleanup 本身的调用顺序。
+	upstream := "sk-airlock-forcleanup"
+	require.NoError(t, admin.GenerateKey(ctx, litellm.Key{Key: upstream, Models: []string{}}))
+	admin.resetCalls()
+
+	iss.cleanup(ctx, "no-such-row", upstream)
+
+	calls := admin.callsSnapshot()
+	require.Equal(t, []string{"exists:" + upstream, "delete:" + upstream}, calls,
+		"必须先确认存在再删除，且只对上游发这两个调用")
+	require.False(t, admin.has(upstream), "上游密钥应已删除")
+}
+
+func TestCleanupKeepsLocalRowWhenUpstreamUnreachable(t *testing.T) {
+	// 查不清上游状态时宁可留一条看得见的 pending 行，
+	// 也不能删掉它并可能留下一把无主凭据。
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+
+	k := sampleKey("k-stuck", "h-stuck")
+	k.UserID = uid
+	require.NoError(t, keys.CreatePending(ctx, k))
+	admin.existsErr = errUpstreamDown
+
+	iss.cleanup(ctx, "k-stuck", "sk-airlock-whatever")
+
+	got, err := keys.Get(ctx, "k-stuck")
+	require.NoError(t, err, "上游状态不明时必须保留本地行")
+	require.Equal(t, "pending", got.Status)
+}
+
+func TestCleanupSkipsDeleteWhenUpstreamAbsent(t *testing.T) {
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+
+	k := sampleKey("k-absent", "h-absent")
+	k.UserID = uid
+	require.NoError(t, keys.CreatePending(ctx, k))
+	admin.resetCalls()
+
+	iss.cleanup(ctx, "k-absent", "sk-airlock-never-created")
+
+	for _, c := range admin.callsSnapshot() {
+		require.NotContains(t, c, "delete:", "上游本就不存在时不该发删除请求")
+	}
+	_, err := keys.Get(ctx, "k-absent")
+	require.ErrorIs(t, err, ErrAPIKeyNotFound, "本地行仍应被清掉")
 }
