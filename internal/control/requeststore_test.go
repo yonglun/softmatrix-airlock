@@ -396,3 +396,100 @@ func TestNotificationsCascadeWithRequest(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM notifications`).Scan(&n))
 	require.Zero(t, n)
 }
+
+// newKeyReqIn 与 newKeyReq 相同，但可以指定所属节点。
+func newKeyReqIn(id, uid, orgID string) *Request {
+	return &Request{
+		ID: id, Kind: RequestKindNewKey, RequesterID: uid, OrgID: orgID,
+		Reason: "要一把密钥", KeyName: strp("我的密钥"), Models: []string{"qwen-plus"},
+	}
+}
+
+func TestListAllPendingOnlyPending(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	ctx := context.Background()
+	uid, _ := seedRequestFixtures(t, db)
+	s := NewPostgresRequestStore(db)
+
+	require.NoError(t, s.Create(ctx, newKeyReq("r-pending", uid)))
+	require.NoError(t, s.Create(ctx, newKeyReq("r-done", uid)))
+	require.NoError(t, s.Decide(ctx, "r-done", RequestStatusApproved, uid))
+
+	got, err := s.ListAllPending(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "r-pending", got[0].ID)
+}
+
+func TestListPendingForOrgPathsCoversSubtree(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	ctx := context.Background()
+	uid, _ := seedRequestFixtures(t, db)
+	s := NewPostgresRequestStore(db)
+
+	seedOrg(t, db, "root", "/root")
+	seedOrg(t, db, "rd", "/root/rd")
+	seedOrg(t, db, "deep", "/root/rd/deep")
+	require.NoError(t, s.Create(ctx, newKeyReqIn("r-rd", uid, "rd")))
+	require.NoError(t, s.Create(ctx, newKeyReqIn("r-deep", uid, "deep")))
+
+	got, err := s.ListPendingForOrgPaths(ctx, []string{"/root/rd"})
+	require.NoError(t, err)
+	require.Len(t, got, 2, "节点自身与后代的申请都要能看到")
+}
+
+func TestListPendingForOrgPathsSparesSiblingWithSamePrefix(t *testing.T) {
+	// 第四次撞上这个陷阱（P1.2b 权限判定、P1.3b 审批人查找、P1.3c 子树吊销
+	// 各一次）：/root/rd 是 /root/rd2 的前缀，但 rd2 不在 rd 的子树里。
+	// 少了分隔符，隔壁部门的申请会泄漏给这个审批人。
+	db := testDB(t)
+	cleanTables(t, db)
+	ctx := context.Background()
+	uid, _ := seedRequestFixtures(t, db)
+	s := NewPostgresRequestStore(db)
+
+	seedOrg(t, db, "root", "/root")
+	seedOrg(t, db, "rd", "/root/rd")
+	seedOrg(t, db, "rd2", "/root/rd2")
+	require.NoError(t, s.Create(ctx, newKeyReqIn("r-rd", uid, "rd")))
+	require.NoError(t, s.Create(ctx, newKeyReqIn("r-rd2", uid, "rd2")))
+
+	got, err := s.ListPendingForOrgPaths(ctx, []string{"/root/rd"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "r-rd", got[0].ID, "同前缀兄弟节点的申请不能泄漏")
+}
+
+func TestListPendingForOrgPathsExcludesDecided(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	ctx := context.Background()
+	uid, _ := seedRequestFixtures(t, db)
+	s := NewPostgresRequestStore(db)
+
+	seedOrg(t, db, "rd", "/rd")
+	require.NoError(t, s.Create(ctx, newKeyReqIn("r-done", uid, "rd")))
+	require.NoError(t, s.Decide(ctx, "r-done", RequestStatusRejected, uid))
+
+	got, err := s.ListPendingForOrgPaths(ctx, []string{"/rd"})
+	require.NoError(t, err)
+	require.Empty(t, got, "已审过的不该再出现在待审列表里")
+}
+
+func TestListPendingForOrgPathsEmptyInputReturnsNothing(t *testing.T) {
+	// 权限范围为空的调用者什么都不该看到——尤其不能因为空的
+	// IN 列表退化成「不加限制」，那是最危险的失败方向。
+	db := testDB(t)
+	cleanTables(t, db)
+	ctx := context.Background()
+	uid, _ := seedRequestFixtures(t, db)
+	s := NewPostgresRequestStore(db)
+	seedOrg(t, db, "rd", "/rd")
+	require.NoError(t, s.Create(ctx, newKeyReqIn("r-rd", uid, "rd")))
+
+	got, err := s.ListPendingForOrgPaths(ctx, nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}

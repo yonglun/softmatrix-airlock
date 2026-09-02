@@ -288,6 +288,11 @@ type RequestStore interface {
 	Create(ctx context.Context, r *Request) error
 	Get(ctx context.Context, id string) (*Request, error)
 	ListByRequester(ctx context.Context, userID string) ([]*Request, error)
+	// ListAllPending 返回全部待审申请。供持全局 key:write 的人使用。
+	ListAllPending(ctx context.Context) ([]*Request, error)
+	// ListPendingForOrgPaths 返回 org 落在这些路径子树内的待审申请。
+	// paths 为空时返回空列表——权限范围为空的人什么都不该看到。
+	ListPendingForOrgPaths(ctx context.Context, paths []string) ([]*Request, error)
 	// Decide 只在 pending 时生效，否则返回 ErrRequestNotPending。
 	Decide(ctx context.Context, id, status, decidedBy string) error
 	// MarkExecuted 只在 approved 时生效，否则返回 ErrRequestNotApproved。
