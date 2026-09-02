@@ -314,6 +314,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleList }),
 		},
 		{
+			// 审批人视角的待审列表。可见范围在处理器内按 key:write 的
+			// Scopes 过滤，与 GET /api/orgs 同一先例。
+			Pattern: "GET /api/requests/to-approve", Access: AccessAuthenticated,
+			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleToApprove }),
+		},
+		{
 			// 以下三条路径里只有 request ID，中间件拿不到它归属的节点，
 			// 判定下沉到处理器自己做，与 DELETE /api/keys/{id} 同理。
 			Pattern: "POST /api/requests/{id}/approve", Access: AccessAuthenticated,

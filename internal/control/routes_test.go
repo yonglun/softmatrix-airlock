@@ -259,6 +259,7 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"POST /api/requests/{id}/approve",
 		"POST /api/requests/{id}/reject",
 		"POST /api/requests/{id}/claim",
+		"GET /api/requests/to-approve",
 		"POST /api/keys/{id}/rotate",
 		"POST /api/orgs/{id}/keys/revoke",
 		"POST /api/keys/revoke-all",
