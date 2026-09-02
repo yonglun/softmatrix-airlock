@@ -3,11 +3,13 @@ package control
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/softmatrix/airlock/internal/apikey"
 	"github.com/softmatrix/airlock/internal/cryptobox"
 	"github.com/softmatrix/airlock/internal/litellm"
 )
@@ -296,4 +298,107 @@ func TestCleanupStalePendingIgnoresFreshRows(t *testing.T) {
 
 	_, err = keys.Get(ctx, "k-fresh")
 	require.NoError(t, err)
+}
+
+func TestRotateReturnsNewPlaintextAndKeepsUpstreamKey(t *testing.T) {
+	// D1/D2 的核心：轮换只换客户端凭据，上游密钥原封不动——
+	// 预算桶因此连续，不会在窗口期裂成两份。
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	oldPlain, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "轮换测试", Models: []string{},
+	})
+	require.NoError(t, err)
+	before, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	admin.resetCalls()
+
+	newPlain, rotated, err := iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+
+	require.NotEqual(t, oldPlain, newPlain, "必须换出一把新的客户端凭据")
+	require.True(t, strings.HasPrefix(newPlain, "ak-"))
+	require.Equal(t, k.ID, rotated.ID, "密钥身份跨轮换稳定")
+	require.Equal(t, before.UpstreamKeyEnc, rotated.UpstreamKeyEnc,
+		"上游密钥必须原封不动——预算桶靠它保持连续")
+	require.Empty(t, admin.callsSnapshot(), "轮换不调用上游")
+}
+
+func TestRotateStoresOnlyHashOfNewPlaintext(t *testing.T) {
+	iss, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+
+	newPlain, _, err := iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+
+	var stored string
+	require.NoError(t, db.QueryRow(
+		`SELECT key_hash FROM api_keys WHERE id=$1`, k.ID).Scan(&stored))
+	require.NotEqual(t, newPlain, stored, "库里绝不能出现明文")
+	require.Equal(t, apikey.Hash(newPlain), stored)
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.PrevKeyHash)
+}
+
+func TestRotateRejectsRevokedKey(t *testing.T) {
+	iss, _, _, _, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, iss.Revoke(ctx, k.ID))
+
+	_, _, err = iss.Rotate(ctx, k.ID, time.Hour)
+	require.ErrorIs(t, err, ErrKeyNotActive)
+}
+
+func TestRotateDefaultsAndCapsWindow(t *testing.T) {
+	iss, _, _, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+
+	// 0 表示用默认值。
+	_, _, err = iss.Rotate(ctx, k.ID, 0)
+	require.NoError(t, err)
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(defaultRotationWindow),
+		*got.PrevKeyExpiresAt, time.Minute)
+
+	// 超过上限直接拒绝——否则填个 10 年就把轮换变成了摆设。
+	_, _, err = iss.Rotate(ctx, k.ID, maxRotationWindow+time.Hour)
+	require.ErrorIs(t, err, ErrWindowTooLong)
+}
+
+func TestRotateTwiceKeepsOnlyOneGenerationOfGrace(t *testing.T) {
+	// 行里只有一个 prev 位置：窗口内二次轮换会让最初那把当场失效。
+	// 这是刻意的——连轮两次通常意味着第一次轮出来的也泄漏了。
+	iss, _, _, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	firstPlain, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+
+	secondPlain, _, err := iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+	_, _, err = iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.Equal(t, apikey.Hash(secondPlain), *got.PrevKeyHash,
+		"prev 位置上应是上一次轮出来的那把")
+	require.NotEqual(t, apikey.Hash(firstPlain), *got.PrevKeyHash,
+		"最初那把必须当场失效")
 }

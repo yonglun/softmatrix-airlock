@@ -46,6 +46,13 @@ type IssueRequest struct {
 
 const upstreamKeyRandomBytes = 32
 
+const (
+	// defaultRotationWindow 是共存窗口的默认时长。
+	defaultRotationWindow = 24 * time.Hour
+	// maxRotationWindow 是上限。不设上限的话，填个 10 年就等于永不轮换。
+	maxRotationWindow = 30 * 24 * time.Hour
+)
+
 // newUpstreamKey 生成一把我们自己决定值的上游密钥。
 //
 // 自带值是整个签发设计幂等的基础：崩溃后重试能用同一个值再调一次，
@@ -206,4 +213,38 @@ func (i *KeyIssuer) CleanupStalePending(ctx context.Context, olderThan time.Dura
 		}
 	}
 	return n, nil
+}
+
+// Rotate 换发客户端凭据，返回新的 ak- 明文（仅此一次）与轮换后的记录。
+//
+// 不调用上游：ak- 到 sk- 的映射完全由控制面持有，换掉客户端那一端
+// 根本不需要惊动 LiteLLM。因此轮换不可能因为上游宕机而失败——这是
+// P1.3a「本地记录优先」推到尽头的形态。
+//
+// 上游密钥保持不变是刻意的（设计文档 D2）：它加密存放、从不离开控制面，
+// 而 ak- 散落在客户端的 .env、CI secrets 与几十份配置里，需要被限定
+// 泄漏后可用时长的是后者。保持同一把上游密钥也让预算桶保持连续。
+func (i *KeyIssuer) Rotate(
+	ctx context.Context, id string, window time.Duration,
+) (string, *APIKey, error) {
+	if window == 0 {
+		window = defaultRotationWindow
+	}
+	if window < 0 || window > maxRotationWindow {
+		return "", nil, ErrWindowTooLong
+	}
+
+	plaintext, hash, prefix, err := apikey.Generate()
+	if err != nil {
+		return "", nil, err
+	}
+	if err := i.deps.Keys.Rotate(ctx, id, hash, prefix, time.Now().Add(window)); err != nil {
+		return "", nil, err
+	}
+
+	k, err := i.deps.Keys.Get(ctx, id)
+	if err != nil {
+		return "", nil, err
+	}
+	return plaintext, k, nil
 }
