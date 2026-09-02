@@ -19,14 +19,18 @@ func NewPostgresKeyStore(db *sql.DB) KeyStore {
 
 const keyColumns = `id, key_hash, key_prefix, org_id, user_id, name,
 	upstream_key_enc, status, models, max_budget, budget_duration,
-	rpm_limit, tpm_limit, expires_at, created_at`
+	rpm_limit, tpm_limit, expires_at,
+	prev_key_hash, prev_key_expires_at, rotated_at,
+	upstream_blocked_at, upstream_block_attempts, created_at`
 
 func scanKey(row interface{ Scan(...any) error }) (*APIKey, error) {
 	var k APIKey
 	var models []byte
 	if err := row.Scan(&k.ID, &k.KeyHash, &k.KeyPrefix, &k.OrgID, &k.UserID, &k.Name,
 		&k.UpstreamKeyEnc, &k.Status, &models, &k.MaxBudget, &k.BudgetDuration,
-		&k.RPMLimit, &k.TPMLimit, &k.ExpiresAt, &k.CreatedAt); err != nil {
+		&k.RPMLimit, &k.TPMLimit, &k.ExpiresAt,
+		&k.PrevKeyHash, &k.PrevKeyExpiresAt, &k.RotatedAt,
+		&k.UpstreamBlockedAt, &k.UpstreamBlockAttempts, &k.CreatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(models, &k.Models); err != nil {
@@ -145,4 +149,51 @@ func orEmptyStrings(v []string) []string {
 		return []string{}
 	}
 	return v
+}
+
+// Rotate 换发客户端凭据。
+//
+// WHERE status = 'active' 是乐观并发守卫，与 P1.3b 的 Decide/MarkExecuted
+// 同一套：已吊销或仍 pending 的密钥不能轮换。
+//
+// 行里只有一个 prev_key_hash 的位置，因此窗口内再次轮换会让上一次轮出来的
+// 成为新的 prev、最初那把当场失效——「最多只保留一代宽限」。这是刻意的：
+// 会连着轮两次通常意味着第一次轮出来的也泄漏了。
+func (s *postgresKeyStore) Rotate(
+	ctx context.Context, id, newHash, newPrefix string, prevExpiresAt time.Time,
+) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys SET
+			key_hash = $1, key_prefix = $2,
+			prev_key_hash = key_hash, prev_key_expires_at = $3,
+			rotated_at = $4
+		WHERE id = $5 AND status = 'active'`,
+		newHash, newPrefix, prevExpiresAt.UTC(), time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("轮换密钥失败: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// 分辨「不存在」与「状态不对」，让调用方能返回正确的状态码。
+		if _, gerr := s.Get(ctx, id); gerr != nil {
+			return gerr
+		}
+		return ErrKeyNotActive
+	}
+	return nil
+}
+
+func (s *postgresKeyStore) RetireExpiredPrevKeys(
+	ctx context.Context, now time.Time,
+) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys SET prev_key_hash = NULL, prev_key_expires_at = NULL
+		WHERE prev_key_hash IS NOT NULL AND prev_key_expires_at <= $1`, now.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("清理过期旧凭据失败: %w", err)
+	}
+	return res.RowsAffected()
 }

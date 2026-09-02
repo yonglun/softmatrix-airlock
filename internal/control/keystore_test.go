@@ -251,3 +251,72 @@ func TestUpstreamBlockAttemptsDefaultsToZero(t *testing.T) {
 	require.Zero(t, attempts)
 	require.Nil(t, blockedAt, "新签发的密钥还没被吊销，谈不上封禁")
 }
+
+// seedKey 造一把密钥，供本文件的存储层测试使用。
+func seedKey(t *testing.T, db *sql.DB, id, hash, orgID, uid, status string) {
+	t.Helper()
+	_, err := db.Exec(`
+		INSERT INTO api_keys (id, key_hash, key_prefix, org_id, user_id,
+		                      upstream_key_enc, status, models)
+		VALUES ($1,$2,'ak-xxxxxxxxx',$3,$4,'enc',$5,'[]'::jsonb)`,
+		id, hash, orgID, uid, status)
+	require.NoError(t, err)
+}
+
+func TestKeyStoreRotateMovesHashToPrev(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedKey(t, db, "k1", "oldhash", "gw", uid, "active")
+	exp := time.Now().Add(2 * time.Hour)
+
+	require.NoError(t, keys.Rotate(ctx, "k1", "newhash", "ak-newpref", exp))
+
+	got, err := keys.Get(ctx, "k1")
+	require.NoError(t, err)
+	require.Equal(t, "newhash", got.KeyHash)
+	require.Equal(t, "ak-newpref", got.KeyPrefix)
+	require.Equal(t, "oldhash", *got.PrevKeyHash, "旧哈希必须挪进 prev")
+	require.NotNil(t, got.PrevKeyExpiresAt)
+	require.NotNil(t, got.RotatedAt)
+}
+
+func TestKeyStoreRotateOnlyFromActive(t *testing.T) {
+	// 已吊销的密钥不能被轮换活过来。
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedKey(t, db, "k1", "oldhash", "gw", uid, "revoked")
+
+	err := keys.Rotate(ctx, "k1", "newhash", "ak-newpref", time.Now().Add(time.Hour))
+	require.ErrorIs(t, err, ErrKeyNotActive)
+}
+
+func TestKeyStoreRotateUnknownKey(t *testing.T) {
+	_, _, _, keys, _, _ := issuerFixture(t)
+
+	err := keys.Rotate(context.Background(), "nope", "h", "p", time.Now().Add(time.Hour))
+	require.ErrorIs(t, err, ErrAPIKeyNotFound, "不存在与状态不对必须能分辨")
+}
+
+func TestKeyStoreRetireExpiredPrevKeys(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	seedKey(t, db, "k-expired", "h1", "gw", uid, "active")
+	seedKey(t, db, "k-live", "h2", "gw", uid, "active")
+	require.NoError(t, keys.Rotate(ctx, "k-expired", "h1b", "ak-p1", now.Add(-time.Hour)))
+	require.NoError(t, keys.Rotate(ctx, "k-live", "h2b", "ak-p2", now.Add(time.Hour)))
+
+	n, err := keys.RetireExpiredPrevKeys(ctx, now)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+
+	expired, err := keys.Get(ctx, "k-expired")
+	require.NoError(t, err)
+	require.Nil(t, expired.PrevKeyHash, "过期的应被置空")
+	require.Nil(t, expired.PrevKeyExpiresAt)
+
+	live, err := keys.Get(ctx, "k-live")
+	require.NoError(t, err)
+	require.NotNil(t, live.PrevKeyHash, "没到期的不该动")
+}
