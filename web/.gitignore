@@ -1,0 +1,6 @@
+node_modules/
+dist/*
+!dist/.gitkeep
+.next/
+next-env.d.ts
+*.tsbuildinfo

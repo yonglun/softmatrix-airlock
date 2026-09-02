@@ -1,9 +1,15 @@
-.PHONY: test build lint up down migrate
+.PHONY: test build lint up down migrate console console-install
 
 test:
 	go test ./... -race -count=1
 
-build:
+console-install:
+	cd web && npm ci
+
+console:
+	cd web && npm run build
+
+build: console
 	go build -o bin/airlock ./cmd/airlock
 
 lint:
