@@ -35,6 +35,9 @@ type Config struct {
 	SMTPAddr               string
 	SMTPFrom               string
 	ApprovalWorkerInterval time.Duration
+	// KeyMaintenanceInterval 是密钥维护循环的周期：补做上游封禁、
+	// 清理过期的旧凭据。
+	KeyMaintenanceInterval time.Duration
 }
 
 const encryptionKeyLen = 32
@@ -111,6 +114,20 @@ func Load(getenv Getenv) (Config, error) {
 				"APPROVAL_WORKER_INTERVAL 必须为正数，当前为 %s", raw)
 		}
 		cfg.ApprovalWorkerInterval = d
+	}
+
+	cfg.KeyMaintenanceInterval = time.Minute
+	if raw := getenv("KEY_MAINTENANCE_INTERVAL"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf(
+				"KEY_MAINTENANCE_INTERVAL 不是合法的时间间隔（如 1m、30s）: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf(
+				"KEY_MAINTENANCE_INTERVAL 必须为正数，当前为 %s", raw)
+		}
+		cfg.KeyMaintenanceInterval = d
 	}
 
 	return cfg, nil

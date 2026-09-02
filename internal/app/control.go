@@ -213,6 +213,36 @@ func RunControl() error {
 		}
 	}()
 
+	// 密钥维护循环：补做上游封禁 + 清理过期的旧凭据。
+	//
+	// 上游封禁是兜底——批量吊销只做本地 UPDATE 就返回（上游没有批量封禁
+	// 接口），单把吊销与离职对账内联失败时也留白给这里收敛。
+	// 清理过期旧凭据纯属卫生：到期判断在 Edge 的 SQL 里，
+	// 这个循环从不运行也不会留下一把还能用的旧密钥。
+	go func() {
+		ticker := time.NewTicker(cfg.KeyMaintenanceInterval)
+		defer ticker.Stop()
+		for {
+			if n, err := issuer.BlockPendingUpstream(runCtx); err != nil {
+				slog.Error("补做上游封禁失败，将在下轮重试", "err", err)
+			} else if n > 0 {
+				slog.Info("已补做上游封禁", "count", n)
+			}
+			if n, err := keyStore.RetireExpiredPrevKeys(runCtx, time.Now()); err != nil {
+				slog.Error("清理过期旧凭据失败，将在下轮重试", "err", err)
+			} else if n > 0 {
+				slog.Info("已清理过期的轮换旧凭据", "count", n)
+			}
+
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	slog.Info("密钥维护循环已启动", "interval", cfg.KeyMaintenanceInterval)
+
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("Control 启动",
