@@ -254,6 +254,11 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"POST /api/keys",
 		"GET /api/orgs/{id}/keys",
 		"DELETE /api/keys/{id}",
+		"POST /api/requests",
+		"GET /api/requests",
+		"POST /api/requests/{id}/approve",
+		"POST /api/requests/{id}/reject",
+		"POST /api/requests/{id}/claim",
 	} {
 		require.True(t, patterns[want], "路由表缺少 %s", want)
 	}
