@@ -151,3 +151,44 @@ func TestDeleteKey(t *testing.T) {
 	require.NoError(t, c.DeleteKey(context.Background(), "sk-x"))
 	require.Equal(t, []any{"sk-x"}, body["keys"])
 }
+
+func TestUpdateKeyBudget(t *testing.T) {
+	var body map[string]any
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/key/update", r.URL.Path)
+		raw, _ := io.ReadAll(r.Body)
+		require.NoError(t, json.Unmarshal(raw, &body))
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	require.NoError(t, c.UpdateKeyBudget(context.Background(), "sk-x", 50))
+	require.Equal(t, "sk-x", body["key"])
+	require.Equal(t, 50.0, body["max_budget"])
+}
+
+func TestUpdateKeyBudgetSendsOnlyBudget(t *testing.T) {
+	// /key/update 是部分更新：只发 max_budget 不会波及 models 等字段。
+	// 多发字段反而有覆盖掉别处配置的风险，所以这里刻意只发两个。
+	var body map[string]any
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		require.NoError(t, json.Unmarshal(raw, &body))
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	require.NoError(t, c.UpdateKeyBudget(context.Background(), "sk-x", 5))
+	require.Len(t, body, 2, "只该有 key 与 max_budget 两个字段")
+}
+
+func TestUpdateKeyBudgetNotFound(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"Key not found."}}`))
+	})
+
+	err := c.UpdateKeyBudget(context.Background(), "sk-gone", 5)
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusNotFound, apiErr.Status)
+}

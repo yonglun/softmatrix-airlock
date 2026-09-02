@@ -168,6 +168,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.KeyAPI)
 	}
+	reqH := func(pick func(*RequestAPI) http.HandlerFunc) http.HandlerFunc {
+		if deps.RequestAPI == nil {
+			return stub
+		}
+		return pick(deps.RequestAPI)
+	}
 
 	return []Route{
 		// ---- 公开：无需登录 ----
@@ -294,6 +300,32 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 判定下沉到 HandleRevoke 自己做，与 DELETE /api/grants/{id} 同理。
 			Pattern: "DELETE /api/keys/{id}", Access: AccessAuthenticated,
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevoke }),
+		},
+
+		// ---- 申请与审批 ----
+		{
+			Pattern: "POST /api/requests", Access: AccessPermission,
+			Permission: authz.PermKeyRequest, Target: TargetFromBody("org_id"),
+			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleSubmit }),
+		},
+		{
+			// 只返回「我发起的」，按调用者本人过滤，因此不需要节点级判定。
+			Pattern: "GET /api/requests", Access: AccessAuthenticated,
+			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleList }),
+		},
+		{
+			// 以下三条路径里只有 request ID，中间件拿不到它归属的节点，
+			// 判定下沉到处理器自己做，与 DELETE /api/keys/{id} 同理。
+			Pattern: "POST /api/requests/{id}/approve", Access: AccessAuthenticated,
+			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleApprove }),
+		},
+		{
+			Pattern: "POST /api/requests/{id}/reject", Access: AccessAuthenticated,
+			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleReject }),
+		},
+		{
+			Pattern: "POST /api/requests/{id}/claim", Access: AccessAuthenticated,
+			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleClaim }),
 		},
 	}
 }

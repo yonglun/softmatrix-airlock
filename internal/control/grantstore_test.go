@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"database/sql"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -53,8 +54,25 @@ func TestSyncBuiltinRolesRemovesStalePermissions(t *testing.T) {
 
 	perms, err := s.PermissionsForRole(ctx, authz.RoleDeveloper)
 	require.NoError(t, err)
-	require.Equal(t, []string{authz.PermOrgRead}, perms,
+	require.NotContains(t, perms, "legacy:permission",
 		"同步必须清掉代码里已不存在的权限，否则降级后的脏数据会一直留着")
+	// 与 Go 侧注册表逐条比对，而不是写死一份清单——
+	// 写死会让每次调整角色权限都误伤这条测试，而它真正守的是「脏数据被清掉」。
+	require.Equal(t, builtinPermissionsOf(t, authz.RoleDeveloper), perms)
+}
+
+// builtinPermissionsOf 返回某内置角色在 Go 注册表里的权限集（已排序）。
+func builtinPermissionsOf(t *testing.T, roleID string) []string {
+	t.Helper()
+	for _, r := range authz.BuiltinRoles() {
+		if r.ID == roleID {
+			out := append([]string(nil), r.Permissions...)
+			sort.Strings(out)
+			return out
+		}
+	}
+	t.Fatalf("内置角色 %s 不存在", roleID)
+	return nil
 }
 
 func TestValidatePermissionsRejectsUnknown(t *testing.T) {

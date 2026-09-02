@@ -136,3 +136,28 @@ func TestLiteLLMBaseURLIsSeparateFromEdgeUpstream(t *testing.T) {
 	require.Equal(t, "http://edge-upstream:4000", cfg.UpstreamBaseURL)
 	require.Equal(t, "http://admin-api:4000", cfg.LiteLLMBaseURL)
 }
+
+func TestApprovalDefaults(t *testing.T) {
+	cfg, err := Load(func(string) string { return "" })
+	require.NoError(t, err)
+	require.Equal(t, "localhost:1025", cfg.SMTPAddr)
+	require.Equal(t, "airlock@example.com", cfg.SMTPFrom)
+	require.Equal(t, 30*time.Second, cfg.ApprovalWorkerInterval)
+}
+
+func TestApprovalWorkerIntervalRejectsNonPositive(t *testing.T) {
+	// 与 RECONCILE_INTERVAL、LITELLM_SYNC_INTERVAL 同样的理由：
+	// time.NewTicker 在 d <= 0 时 panic，且 panic 在没有 recover 的
+	// goroutine 里，会崩掉整个进程。
+	env := map[string]string{"APPROVAL_WORKER_INTERVAL": "0"}
+	_, err := Load(func(k string) string { return env[k] })
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "APPROVAL_WORKER_INTERVAL")
+}
+
+func TestApprovalWorkerIntervalAcceptsPositive(t *testing.T) {
+	env := map[string]string{"APPROVAL_WORKER_INTERVAL": "10s"}
+	cfg, err := Load(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Second, cfg.ApprovalWorkerInterval)
+}

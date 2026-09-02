@@ -31,6 +31,10 @@ type Config struct {
 	// 凭据。为空时同步整体禁用。
 	LiteLLMMasterKey    string
 	LiteLLMSyncInterval time.Duration
+	// 审批流的通知与后台 worker。
+	SMTPAddr               string
+	SMTPFrom               string
+	ApprovalWorkerInterval time.Duration
 }
 
 const encryptionKeyLen = 32
@@ -49,6 +53,8 @@ func Load(getenv Getenv) (Config, error) {
 		BootstrapAdmin:    getenv("AIRLOCK_BOOTSTRAP_ADMIN"),
 		LiteLLMBaseURL:    or(getenv("LITELLM_BASE_URL"), "http://localhost:4000"),
 		LiteLLMMasterKey:  getenv("LITELLM_MASTER_KEY"),
+		SMTPAddr:          or(getenv("SMTP_ADDR"), "localhost:1025"),
+		SMTPFrom:          or(getenv("SMTP_FROM"), "airlock@example.com"),
 	}
 
 	if raw := getenv("AIRLOCK_ENCRYPTION_KEY"); raw != "" {
@@ -91,6 +97,20 @@ func Load(getenv Getenv) (Config, error) {
 					"如需关闭同步，请改为不设置 LITELLM_MASTER_KEY", raw)
 		}
 		cfg.LiteLLMSyncInterval = d
+	}
+
+	cfg.ApprovalWorkerInterval = 30 * time.Second
+	if raw := getenv("APPROVAL_WORKER_INTERVAL"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf(
+				"APPROVAL_WORKER_INTERVAL 不是合法的时间间隔（如 30s、1m）: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf(
+				"APPROVAL_WORKER_INTERVAL 必须为正数，当前为 %s", raw)
+		}
+		cfg.ApprovalWorkerInterval = d
 	}
 
 	return cfg, nil

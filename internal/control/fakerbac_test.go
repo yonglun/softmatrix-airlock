@@ -82,6 +82,18 @@ func (f *fakeRBACStore) ListGrantsForOrg(_ context.Context, orgID string) ([]Rol
 	return out, nil
 }
 
+func (f *fakeRBACStore) ListGlobalGrants(_ context.Context) ([]RoleGrant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []RoleGrant
+	for _, g := range f.grants {
+		if g.OrgID == nil {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeRBACStore) CountGlobalGrantsOfRole(_ context.Context, roleID string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

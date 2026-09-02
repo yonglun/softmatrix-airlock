@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/softmatrix/airlock/internal/litellm"
@@ -17,6 +18,7 @@ type fakeKeyAdmin struct {
 	existsErr   error
 	blockErr    error
 	deleteErr   error
+	updateErr   error
 
 	calls []string
 }
@@ -52,6 +54,19 @@ func (f *fakeKeyAdmin) BlockKey(_ context.Context, key string) error {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "block:"+key)
 	return f.blockErr
+}
+
+func (f *fakeKeyAdmin) UpdateKeyBudget(_ context.Context, key string, maxBudget float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fmt.Sprintf("update-budget:%g", maxBudget))
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	k := f.keys[key]
+	k.MaxBudget = &maxBudget
+	f.keys[key] = k
+	return nil
 }
 
 func (f *fakeKeyAdmin) DeleteKey(_ context.Context, key string) error {

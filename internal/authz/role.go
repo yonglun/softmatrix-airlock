@@ -45,8 +45,8 @@ var builtinRoles = []Role{
 	{
 		ID:          RoleDeveloper,
 		Name:        "开发者",
-		Description: "普通成员基线：查看自己所属组织的结构",
-		Permissions: []string{PermOrgRead},
+		Description: "普通成员基线：查看自己所属组织的结构、发起密钥与提额申请",
+		Permissions: []string{PermKeyRequest, PermOrgRead},
 	},
 	{
 		ID:          RoleFinOps,
@@ -59,7 +59,7 @@ var builtinRoles = []Role{
 		Name:        "组织管理员",
 		Description: "管理被授予节点及其子树：组织结构、成员归属、角色授予",
 		Permissions: []string{
-			PermGrantRead, PermGrantWrite, PermKeyRead, PermKeyWrite,
+			PermGrantRead, PermGrantWrite, PermKeyRead, PermKeyRequest, PermKeyWrite,
 			PermMemberAssign, PermOrgDelete, PermOrgImport, PermOrgRead, PermOrgWrite,
 		},
 	},

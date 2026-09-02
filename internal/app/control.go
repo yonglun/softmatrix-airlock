@@ -19,6 +19,7 @@ import (
 	"github.com/softmatrix/airlock/internal/control"
 	"github.com/softmatrix/airlock/internal/cryptobox"
 	"github.com/softmatrix/airlock/internal/litellm"
+	"github.com/softmatrix/airlock/internal/notify"
 	"github.com/softmatrix/airlock/migrations"
 )
 
@@ -92,16 +93,20 @@ func RunControl() error {
 
 	resolver := authz.NewResolver(rbac)
 
+	// 同一个 LiteLLM 管理客户端在整个进程里复用——同步、签发、审批 worker
+	// 与离职对账都要调它，没有理由各建一份。
+	litellmAdmin := litellm.New(litellm.Config{
+		BaseURL:   cfg.LiteLLMBaseURL,
+		MasterKey: cfg.LiteLLMMasterKey,
+	})
+
 	// LiteLLM 同步。未配置 master key 时 syncer 为 nil，
 	// OrgAPI 的 Nudge 与 DropNode 随之变成 no-op，状态接口回答「未启用」。
 	var syncer *control.Syncer
 	if cfg.LiteLLMMasterKey != "" {
 		syncer = control.NewSyncer(control.SyncerDeps{
-			Orgs: orgs,
-			Admin: litellm.New(litellm.Config{
-				BaseURL:   cfg.LiteLLMBaseURL,
-				MasterKey: cfg.LiteLLMMasterKey,
-			}),
+			Orgs:  orgs,
+			Admin: litellmAdmin,
 		})
 	}
 
@@ -116,22 +121,36 @@ func RunControl() error {
 	}
 	keyStore := control.NewPostgresKeyStore(db)
 	issuer := control.NewKeyIssuer(control.KeyIssuerDeps{
-		Keys: keyStore, Orgs: orgs, Cipher: cipher,
-		Admin: litellm.New(litellm.Config{
-			BaseURL:   cfg.LiteLLMBaseURL,
-			MasterKey: cfg.LiteLLMMasterKey,
+		Keys: keyStore, Orgs: orgs, Cipher: cipher, Admin: litellmAdmin,
+	})
+
+	requests := control.NewPostgresRequestStore(db)
+	notifs := control.NewPostgresNotificationStore(db)
+
+	approval := control.NewApprovalService(control.ApprovalDeps{
+		Requests: requests, Notifs: notifs, Keys: keyStore,
+		Orgs: orgs, RBAC: rbac, Users: users,
+		Issuer: issuer, Resolver: resolver,
+	})
+	approvalWorker := control.NewApprovalWorker(control.ApprovalWorkerDeps{
+		Requests: requests, Notifs: notifs, Keys: keyStore, Users: users,
+		Admin:  litellmAdmin,
+		Cipher: cipher,
+		Sender: notify.NewSMTPSender(notify.SMTPConfig{
+			Addr: cfg.SMTPAddr, From: cfg.SMTPFrom,
 		}),
 	})
 
 	srv := &http.Server{
 		Addr: cfg.ControlListenAddr,
 		Handler: control.NewServer(control.ServerDeps{
-			Auth:     auth,
-			OrgAPI:   control.NewOrgAPI(orgs, ldapSource, resolver).WithNudger(syncer),
-			GrantAPI: control.NewGrantAPI(users, rbac, resolver),
-			SyncAPI:  control.NewSyncAPI(syncer),
-			KeyAPI:   control.NewKeyAPI(issuer, keyStore, resolver),
-			Resolver: resolver,
+			Auth:       auth,
+			OrgAPI:     control.NewOrgAPI(orgs, ldapSource, resolver).WithNudger(syncer),
+			GrantAPI:   control.NewGrantAPI(users, rbac, resolver),
+			SyncAPI:    control.NewSyncAPI(syncer),
+			KeyAPI:     control.NewKeyAPI(issuer, keyStore, resolver),
+			RequestAPI: control.NewRequestAPI(approval, requests, approvalWorker),
+			Resolver:   resolver,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -152,7 +171,7 @@ func RunControl() error {
 				BindPass: os.Getenv("LDAP_BIND_PASSWORD"),
 				BaseDN:   os.Getenv("LDAP_BASE_DN"),
 			}),
-			Keys: control.NewPostgresKeyRevoker(db),
+			Keys: control.NewPostgresKeyRevoker(db, litellmAdmin, cipher),
 		})
 		go reconciler.Run(runCtx, cfg.ReconcileInterval)
 		slog.Info("离职对账已启用", "interval", cfg.ReconcileInterval)
@@ -167,6 +186,10 @@ func RunControl() error {
 	} else {
 		slog.Warn("未配置 LITELLM_MASTER_KEY，LiteLLM 同步未启用")
 	}
+
+	go approvalWorker.Run(runCtx, cfg.ApprovalWorkerInterval)
+	slog.Info("审批 worker 已启动",
+		"interval", cfg.ApprovalWorkerInterval, "smtp", cfg.SMTPAddr)
 
 	// 滞留的 pending 是「上游调用与 MarkActive 之间崩掉」留下的残骸。
 	// 阈值取 10 分钟：远大于一次签发的正常耗时，不会误伤进行中的签发。

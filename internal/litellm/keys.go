@@ -65,3 +65,13 @@ func (c *Client) BlockKey(ctx context.Context, key string) error {
 func (c *Client) DeleteKey(ctx context.Context, key string) error {
 	return c.do(ctx, http.MethodPost, "/key/delete", map[string]any{"keys": []string{key}}, nil)
 }
+
+// UpdateKeyBudget 改一把密钥的 max_budget。临时提额与到期回收都用它。
+//
+// /key/update 是部分更新：只发这两个字段不会波及 models、rpm_limit 等
+// 其它配置（已实测）。刻意不做成通用的 UpdateKey——多发字段就多一分
+// 覆盖掉别处配置的风险，而本阶段只需要改预算这一件事。
+func (c *Client) UpdateKeyBudget(ctx context.Context, key string, maxBudget float64) error {
+	body := map[string]any{"key": key, "max_budget": maxBudget}
+	return c.do(ctx, http.MethodPost, "/key/update", body, nil)
+}
