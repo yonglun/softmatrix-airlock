@@ -126,3 +126,67 @@ func TestPostgresStoreExpiredKeyIsRejected(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorIs(t, k.Validate(time.Now()), ErrKeyExpired)
 }
+
+// seedRotated 在 seed() 造好的那把密钥上模拟一次轮换。
+func seedRotated(t *testing.T, db *sql.DB, newHash, prevHash string, prevExpires time.Time) {
+	t.Helper()
+	_, err := db.Exec(`
+		UPDATE api_keys SET key_hash = $1, prev_key_hash = $2, prev_key_expires_at = $3
+		WHERE id = 'k1'`, newHash, prevHash, prevExpires)
+	require.NoError(t, err)
+}
+
+func TestPostgresStoreAcceptsPrevKeyInsideWindow(t *testing.T) {
+	db := testDB(t)
+	c := testCipher(t)
+	seed(t, db, c, Hash("ak-original"), StatusActive, nil)
+	seedRotated(t, db, Hash("ak-new"), Hash("ak-original"), time.Now().Add(time.Hour))
+	s := NewPostgresStore(db, c)
+
+	k, err := s.ByHash(context.Background(), Hash("ak-original"))
+	require.NoError(t, err, "窗口内旧凭据必须仍然可用")
+	require.True(t, k.ViaPrevKey, "要能看出这次是靠旧凭据进来的")
+	require.NotNil(t, k.PrevKeyExpiresAt)
+	require.Equal(t, "sk-upstream-secret", k.UpstreamKey)
+}
+
+func TestPostgresStoreAcceptsNewKeyAfterRotation(t *testing.T) {
+	db := testDB(t)
+	c := testCipher(t)
+	seed(t, db, c, Hash("ak-original"), StatusActive, nil)
+	seedRotated(t, db, Hash("ak-new"), Hash("ak-original"), time.Now().Add(time.Hour))
+	s := NewPostgresStore(db, c)
+
+	k, err := s.ByHash(context.Background(), Hash("ak-new"))
+	require.NoError(t, err)
+	require.False(t, k.ViaPrevKey, "新凭据不是走 prev 路径")
+}
+
+func TestPostgresStoreRejectsPrevKeyAfterWindow(t *testing.T) {
+	// 设计文档 D5：到期判断在 SQL 里，因此窗口一过旧凭据当场失效——
+	// 这条测试全程不运行任何 worker，正是要证明正确性不依赖后台任务。
+	db := testDB(t)
+	c := testCipher(t)
+	seed(t, db, c, Hash("ak-original"), StatusActive, nil)
+	seedRotated(t, db, Hash("ak-new"), Hash("ak-original"), time.Now().Add(-time.Minute))
+	s := NewPostgresStore(db, c)
+
+	_, err := s.ByHash(context.Background(), Hash("ak-original"))
+	require.ErrorIs(t, err, ErrKeyNotFound, "过期的旧凭据必须查不到")
+
+	// 新凭据不受影响。
+	_, err = s.ByHash(context.Background(), Hash("ak-new"))
+	require.NoError(t, err)
+}
+
+func TestPostgresStoreUnrotatedKeyHasNoPrevMarkers(t *testing.T) {
+	db := testDB(t)
+	c := testCipher(t)
+	seed(t, db, c, Hash("ak-plain"), StatusActive, nil)
+	s := NewPostgresStore(db, c)
+
+	k, err := s.ByHash(context.Background(), Hash("ak-plain"))
+	require.NoError(t, err)
+	require.False(t, k.ViaPrevKey)
+	require.Nil(t, k.PrevKeyExpiresAt)
+}

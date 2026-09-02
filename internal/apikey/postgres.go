@@ -23,15 +23,24 @@ func NewPostgresStore(db *sql.DB, cipher *cryptobox.Cipher) *PostgresStore {
 	return &PostgresStore{db: db, cipher: cipher}
 }
 
+// ByHash 按凭据哈希查密钥，兼容轮换共存窗口内的旧凭据。
+//
+// 到期判断写在 SQL 里而不是 Go 里：窗口一过，旧凭据在那一刻自己失效，
+// 哪怕清理 worker 从此再没跑过。清理 worker 因此纯属卫生——它失败只会
+// 留下难看的死数据，不会留下一把还能用的旧密钥。
 func (s *PostgresStore) ByHash(ctx context.Context, hash string) (*Key, error) {
 	var (
 		k   Key
 		enc string
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, key_prefix, org_id, user_id, upstream_key_enc, status, expires_at
-		FROM api_keys WHERE key_hash = $1`, hash).
-		Scan(&k.ID, &k.Prefix, &k.OrgID, &k.UserID, &enc, &k.Status, &k.ExpiresAt)
+		SELECT id, key_prefix, org_id, user_id, upstream_key_enc, status, expires_at,
+		       (key_hash <> $1) AS via_prev, prev_key_expires_at
+		FROM api_keys
+		WHERE key_hash = $1
+		   OR (prev_key_hash = $1 AND prev_key_expires_at > now())`, hash).
+		Scan(&k.ID, &k.Prefix, &k.OrgID, &k.UserID, &enc, &k.Status, &k.ExpiresAt,
+			&k.ViaPrevKey, &k.PrevKeyExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrKeyNotFound
 	}
