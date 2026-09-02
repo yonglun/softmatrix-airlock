@@ -205,6 +205,7 @@ type LiteLLMKeyAdmin interface {
 	KeyExists(ctx context.Context, key string) (bool, error)
 	BlockKey(ctx context.Context, key string) error
 	DeleteKey(ctx context.Context, key string) error
+	UpdateKeyBudget(ctx context.Context, key string, maxBudget float64) error
 }
 
 // 申请单的 kind 与 status 取值。与迁移里的 CHECK 约束一一对应。
