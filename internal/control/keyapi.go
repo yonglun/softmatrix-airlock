@@ -141,6 +141,57 @@ func (a *KeyAPI) HandleRevoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleRotate 换发一把密钥的客户端凭据。新的 ak- 明文只在这里返回一次。
+//
+// 权限判定下沉到这里：路径里只有密钥 ID，中间件拿不到它所属的节点，
+// 与 HandleRevoke 是同一类例外。允许两种人轮换——
+// 责任人本人（自助，与 P1.3b 的自助领取一脉相承），
+// 或在该密钥所属节点上持有 key:write 的管理员（替人处置）。
+func (a *KeyAPI) HandleRotate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		// WindowSeconds 是共存窗口秒数；0 或缺省表示用默认值。
+		WindowSeconds int64 `json:"window_seconds"`
+	}
+	// 空请求体是合法的（表示全用默认值），因此解码失败不当错误处理。
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	id := r.PathValue("id")
+	k, err := a.keys.Get(r.Context(), id)
+	if err != nil {
+		writeKeyError(w, err, "轮换密钥失败")
+		return
+	}
+
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+	if u.ID != k.UserID {
+		allowed, err := a.resolver.Can(r.Context(), subjectOf(u), authz.PermKeyWrite, &k.OrgID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+			return
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "permission_denied", "没有轮换该密钥的权限")
+			return
+		}
+	}
+
+	plaintext, rotated, err := a.issuer.Rotate(
+		r.Context(), id, time.Duration(body.WindowSeconds)*time.Second)
+	if err != nil {
+		writeKeyError(w, err, "轮换密钥失败")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		keyView
+		Key string `json:"key"`
+	}{keyView: viewOf(rotated), Key: plaintext})
+}
+
 // writeKeyError 把密钥相关的领域错误映射为合适的状态码。
 func writeKeyError(w http.ResponseWriter, err error, fallback string) {
 	switch {
@@ -151,6 +202,12 @@ func writeKeyError(w http.ResponseWriter, err error, fallback string) {
 			"该节点不是密钥边界，请先将其标记为 key holder")
 	case errors.Is(err, ErrAPIKeyNotFound):
 		writeError(w, http.StatusNotFound, "key_not_found", "密钥不存在")
+	case errors.Is(err, ErrKeyNotActive):
+		writeError(w, http.StatusConflict, "key_not_active",
+			"密钥不处于可用状态，无法轮换")
+	case errors.Is(err, ErrWindowTooLong):
+		writeError(w, http.StatusBadRequest, "window_too_long",
+			"共存窗口超过上限（最长 30 天）")
 	default:
 		writeError(w, http.StatusBadGateway, "upstream_failed", fallback)
 	}

@@ -187,3 +187,107 @@ func TestRevokeAPIWithoutPermissionIs403(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rec2.Code)
 	require.Contains(t, rec2.Body.String(), "permission_denied")
 }
+
+// rotateReq 发一次轮换请求。
+func rotateReq(
+	t *testing.T, api *KeyAPI, callerID, keyID, body string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/keys/"+keyID+"/rotate", strings.NewReader(body))
+	req.SetPathValue("id", keyID)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: callerID, Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleRotate(rec, req)
+	return rec
+}
+
+func TestRotateAPIByOwnerReturnsNewPlaintext(t *testing.T) {
+	// 责任人可以自助轮换自己的密钥，与 P1.3b 的自助领取一脉相承。
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	issued := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"x","models":[]}`)
+	require.Equal(t, http.StatusCreated, issued.Code)
+	var created struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	require.NoError(t, json.Unmarshal(issued.Body.Bytes(), &created))
+
+	rec := rotateReq(t, api, uid, created.ID, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, created.ID, got.ID, "密钥身份跨轮换稳定")
+	require.True(t, strings.HasPrefix(got.Key, "ak-"))
+	require.NotEqual(t, created.Key, got.Key)
+}
+
+func TestRotateAPIByStrangerIs403(t *testing.T) {
+	// 既不是责任人、也没有 key:write，不能轮换别人的密钥。
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	issued := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"x","models":[]}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(issued.Body.Bytes(), &created))
+
+	rec := rotateReq(t, api, "someone-else", created.ID, `{}`)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "permission_denied")
+}
+
+func TestRotateAPIByAdminWithKeyWrite(t *testing.T) {
+	// 管理员可以替人处置。
+	api, _, _, _, rbac, uid := keyAPIFixture(t)
+	issued := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"x","models":[]}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(issued.Body.Bytes(), &created))
+
+	adminID := "admin-user"
+	require.NoError(t, rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-admin", UserID: adminID, RoleID: authz.RoleOrgAdmin, OrgID: strp("gw"),
+	}))
+
+	rec := rotateReq(t, api, adminID, created.ID, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRotateAPIUnknownKeyIs404(t *testing.T) {
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	rec := rotateReq(t, api, uid, "nope", `{}`)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRotateAPIRevokedKeyIs409(t *testing.T) {
+	api, _, _, keys, _, uid := keyAPIFixture(t)
+	issued := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"x","models":[]}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(issued.Body.Bytes(), &created))
+	require.NoError(t, keys.Revoke(context.Background(), created.ID))
+
+	rec := rotateReq(t, api, uid, created.ID, `{}`)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "key_not_active")
+}
+
+func TestRotateAPIWindowTooLongIs400(t *testing.T) {
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	issued := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"x","models":[]}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(issued.Body.Bytes(), &created))
+
+	rec := rotateReq(t, api, uid, created.ID, `{"window_seconds":99999999}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "window_too_long")
+}
