@@ -148,7 +148,7 @@ func RunControl() error {
 			OrgAPI:     control.NewOrgAPI(orgs, ldapSource, resolver).WithNudger(syncer),
 			GrantAPI:   control.NewGrantAPI(users, rbac, resolver),
 			SyncAPI:    control.NewSyncAPI(syncer),
-			KeyAPI:     control.NewKeyAPI(issuer, keyStore, resolver),
+			KeyAPI:     control.NewKeyAPI(issuer, keyStore, orgs, resolver),
 			RequestAPI: control.NewRequestAPI(approval, requests, approvalWorker),
 			Resolver:   resolver,
 		}).Handler(),

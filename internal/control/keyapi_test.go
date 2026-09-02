@@ -24,7 +24,7 @@ func keyAPIFixture(t *testing.T) (api *KeyAPI, orgs *fakeOrgStore, admin *fakeKe
 	// fakeOrgStore 的树走，必须显式登记——否则 HandleRevoke 的权限判定
 	// 直接因 authz.ErrOrgNotFound 拿到 500，而不是被测的业务状态码。
 	rbac.setPath("gw", "/gw")
-	return NewKeyAPI(iss, keys, authz.NewResolver(rbac)), orgs, admin, keys, rbac, uid
+	return NewKeyAPI(iss, keys, orgs, authz.NewResolver(rbac)), orgs, admin, keys, rbac, uid
 }
 
 func postKey(t *testing.T, api *KeyAPI, body string) *httptest.ResponseRecorder {
@@ -290,4 +290,81 @@ func TestRotateAPIWindowTooLongIs400(t *testing.T) {
 	rec := rotateReq(t, api, uid, created.ID, `{"window_seconds":99999999}`)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "window_too_long")
+}
+
+func revokeOrgReq(t *testing.T, api *KeyAPI, callerID, orgID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/"+orgID+"/keys/revoke", nil)
+	req.SetPathValue("id", orgID)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: callerID, Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleRevokeOrg(rec, req)
+	return rec
+}
+
+func revokeAllReq(t *testing.T, api *KeyAPI, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/keys/revoke-all",
+		strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: "someone", Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleRevokeAll(rec, req)
+	return rec
+}
+
+func TestRevokeOrgAPIRevokesSubtree(t *testing.T) {
+	api, _, _, keys, _, uid := keyAPIFixture(t)
+	issued := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"x","models":[]}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(issued.Body.Bytes(), &created))
+
+	rec := revokeOrgReq(t, api, uid, "gw")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got struct {
+		Revoked int64 `json:"revoked"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, int64(1), got.Revoked)
+
+	k, err := keys.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", k.Status)
+}
+
+func TestRevokeOrgAPIUnknownOrgIs404(t *testing.T) {
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	rec := revokeOrgReq(t, api, uid, "nope")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRevokeAllAPIRequiresConfirmString(t *testing.T) {
+	// 不可逆操作靠事前防护：确认字符串必须精确匹配。
+	api, _, _, _, _, _ := keyAPIFixture(t)
+
+	require.Equal(t, http.StatusBadRequest, revokeAllReq(t, api, `{}`).Code)
+
+	rec := revokeAllReq(t, api, `{"confirm":"revoke all keys"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "大小写不同也必须拒绝")
+	require.Contains(t, rec.Body.String(), "confirm_required")
+}
+
+func TestRevokeAllAPIWithConfirmRevokesEverything(t *testing.T) {
+	api, _, _, keys, _, uid := keyAPIFixture(t)
+	issued := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"x","models":[]}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(issued.Body.Bytes(), &created))
+
+	rec := revokeAllReq(t, api, `{"confirm":"REVOKE ALL KEYS"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	k, err := keys.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", k.Status)
 }
