@@ -152,7 +152,10 @@ func RunControl() error {
 				BindPass: os.Getenv("LDAP_BIND_PASSWORD"),
 				BaseDN:   os.Getenv("LDAP_BASE_DN"),
 			}),
-			Keys: control.NewPostgresKeyRevoker(db),
+			Keys: control.NewPostgresKeyRevoker(db, litellm.New(litellm.Config{
+				BaseURL:   cfg.LiteLLMBaseURL,
+				MasterKey: cfg.LiteLLMMasterKey,
+			}), cipher),
 		})
 		go reconciler.Run(runCtx, cfg.ReconcileInterval)
 		slog.Info("离职对账已启用", "interval", cfg.ReconcileInterval)

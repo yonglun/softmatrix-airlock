@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/softmatrix/airlock/internal/cryptobox"
 )
 
 // IdentitySource 提供 IdP 侧的用户启用状态。
@@ -119,24 +121,75 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// PostgresKeyRevoker 在 api_keys 表上实现 KeyRevoker。
+// PostgresKeyRevoker 在 api_keys 表上实现 KeyRevoker，并同步封禁上游。
+//
+// 与 KeyIssuer.Revoke 保持同样的纵深：本地标记 + 上游 block。
+// 上游密钥从不离开控制面，所以少了上游那层不是活的漏洞，
+// 但离职场景恰恰是最需要「凭据万一泄漏也用不了」这层兜底的场景。
 type PostgresKeyRevoker struct {
-	db *sql.DB
+	db     *sql.DB
+	admin  LiteLLMKeyAdmin
+	cipher *cryptobox.Cipher
 }
 
-func NewPostgresKeyRevoker(db *sql.DB) *PostgresKeyRevoker {
-	return &PostgresKeyRevoker{db: db}
+func NewPostgresKeyRevoker(
+	db *sql.DB, admin LiteLLMKeyAdmin, cipher *cryptobox.Cipher,
+) *PostgresKeyRevoker {
+	return &PostgresKeyRevoker{db: db, admin: admin, cipher: cipher}
 }
 
 func (k *PostgresKeyRevoker) RevokeByUsers(ctx context.Context, userIDs []string) (int64, error) {
 	if len(userIDs) == 0 {
 		return 0, nil
 	}
+
+	// 先把要吊销的密钥连同上游密文查出来——UPDATE 之后就分不清
+	// 哪些是本次吊销的了。pending 也要算上：那些密钥上游可能已经建成。
+	rows, err := k.db.QueryContext(ctx, `
+		SELECT id, upstream_key_enc FROM api_keys
+		WHERE user_id = ANY($1) AND status IN ('active','pending')`, userIDs)
+	if err != nil {
+		return 0, fmt.Errorf("查询待吊销密钥失败: %w", err)
+	}
+	type target struct{ id, enc string }
+	var targets []target
+	for rows.Next() {
+		var t target
+		if err := rows.Scan(&t.id, &t.enc); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("扫描待吊销密钥失败: %w", err)
+		}
+		targets = append(targets, t)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	_ = rows.Close()
+
 	res, err := k.db.ExecContext(ctx, `
 		UPDATE api_keys SET status = 'revoked'
-		WHERE user_id = ANY($1) AND status = 'active'`, userIDs)
+		WHERE user_id = ANY($1) AND status IN ('active','pending')`, userIDs)
 	if err != nil {
 		return 0, fmt.Errorf("批量吊销密钥失败: %w", err)
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	// 上游封禁尽力而为：失败只记日志。本地已标记 revoked，
+	// Edge 下一个请求就会拒绝该密钥。
+	for _, t := range targets {
+		upstreamKey, derr := k.cipher.Decrypt(t.enc)
+		if derr != nil {
+			slog.Warn("解密上游密钥失败，跳过上游封禁", "key_id", t.id, "err", derr)
+			continue
+		}
+		if berr := k.admin.BlockKey(ctx, upstreamKey); berr != nil {
+			slog.Warn("封禁上游密钥失败，本地已吊销、Edge 已拒绝该密钥",
+				"key_id", t.id, "err", berr)
+		}
+	}
+	return n, nil
 }
