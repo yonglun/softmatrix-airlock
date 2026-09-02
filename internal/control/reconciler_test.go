@@ -272,3 +272,38 @@ func TestKeyRevokerSucceedsWhenUpstreamBlockFails(t *testing.T) {
 	require.NoError(t, err, "上游失败不影响吊销生效")
 	require.Equal(t, int64(1), n)
 }
+
+func TestKeyRevokerStampsUpstreamBlockedOnSuccess(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	cipher := testCipher(t)
+	uid := seedRevokableKey(t, db, cipher, "sk-airlock-leaver", "active")
+
+	r := NewPostgresKeyRevoker(db, newFakeKeyAdmin(), cipher)
+	_, err := r.RevokeByUsers(context.Background(), []string{uid})
+	require.NoError(t, err)
+
+	var blockedAt *time.Time
+	require.NoError(t, db.QueryRow(
+		`SELECT upstream_blocked_at FROM api_keys WHERE id='k1'`).Scan(&blockedAt))
+	require.NotNil(t, blockedAt, "封成了就要盖戳，扫描下一轮不用再管它")
+}
+
+func TestKeyRevokerLeavesStampEmptyWhenUpstreamFails(t *testing.T) {
+	// 留白不是遗漏，是交接：兜底扫描会把它收敛掉。
+	db := testDB(t)
+	cleanTables(t, db)
+	cipher := testCipher(t)
+	uid := seedRevokableKey(t, db, cipher, "sk-airlock-leaver", "active")
+
+	admin := newFakeKeyAdmin()
+	admin.blockErr = errUpstreamDown
+	r := NewPostgresKeyRevoker(db, admin, cipher)
+	_, err := r.RevokeByUsers(context.Background(), []string{uid})
+	require.NoError(t, err, "上游失败不影响吊销生效")
+
+	var blockedAt *time.Time
+	require.NoError(t, db.QueryRow(
+		`SELECT upstream_blocked_at FROM api_keys WHERE id='k1'`).Scan(&blockedAt))
+	require.Nil(t, blockedAt)
+}
