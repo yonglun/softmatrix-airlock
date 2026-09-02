@@ -188,3 +188,66 @@ func TestKeyStoreDelete(t *testing.T) {
 	_, err := s.Get(ctx, "k1")
 	require.ErrorIs(t, err, ErrAPIKeyNotFound)
 }
+
+func TestPrevShapeCheckRejectsHalfFilledPair(t *testing.T) {
+	// 这条 CHECK 是共存窗口的唯一保障。少了它，半填的一对会退化成
+	// 两种糟糕状态之一：expires_at 为空 = 旧凭据永久有效（安全事故），
+	// 或者只有到期时间的孤儿行。
+	_, _, _, _, db, uid := issuerFixture(t)
+
+	_, err := db.Exec(`
+		INSERT INTO api_keys (id, key_hash, key_prefix, org_id, user_id,
+		                      upstream_key_enc, status, models, prev_key_hash)
+		VALUES ('k-half','h-half','ak-x','gw',$1,'enc','active','[]'::jsonb,'oldhash')`, uid)
+	require.Error(t, err, "只填 prev_key_hash、不填到期时间必须被拒")
+	require.Contains(t, err.Error(), "api_keys_prev_shape_check")
+}
+
+func TestPrevShapeCheckRejectsOrphanExpiry(t *testing.T) {
+	_, _, _, _, db, uid := issuerFixture(t)
+
+	_, err := db.Exec(`
+		INSERT INTO api_keys (id, key_hash, key_prefix, org_id, user_id,
+		                      upstream_key_enc, status, models, prev_key_expires_at)
+		VALUES ('k-orphan','h-orphan','ak-x','gw',$1,'enc','active','[]'::jsonb, now())`, uid)
+	require.Error(t, err, "只填到期时间、不填 prev_key_hash 必须被拒")
+	require.Contains(t, err.Error(), "api_keys_prev_shape_check")
+}
+
+func TestPrevKeyHashIsUnique(t *testing.T) {
+	// Edge 要按 prev_key_hash 查行，两行声称同一个哈希会让查询返回多行。
+	_, _, _, _, db, uid := issuerFixture(t)
+
+	for _, id := range []string{"k-a", "k-b"} {
+		_, err := db.Exec(`
+			INSERT INTO api_keys (id, key_hash, key_prefix, org_id, user_id,
+			                      upstream_key_enc, status, models,
+			                      prev_key_hash, prev_key_expires_at)
+			VALUES ($1,$2,'ak-x','gw',$3,'enc','active','[]'::jsonb,
+			        'shared-prev-hash', now() + interval '1 hour')`,
+			id, "h-"+id, uid)
+		if id == "k-a" {
+			require.NoError(t, err)
+			continue
+		}
+		require.Error(t, err, "第二行用同一个 prev_key_hash 必须被唯一索引拒绝")
+	}
+}
+
+func TestUpstreamBlockAttemptsDefaultsToZero(t *testing.T) {
+	_, _, _, _, db, uid := issuerFixture(t)
+
+	_, err := db.Exec(`
+		INSERT INTO api_keys (id, key_hash, key_prefix, org_id, user_id,
+		                      upstream_key_enc, status, models)
+		VALUES ('k-def','h-def','ak-x','gw',$1,'enc','active','[]'::jsonb)`, uid)
+	require.NoError(t, err)
+
+	var attempts int
+	var blockedAt *time.Time
+	require.NoError(t, db.QueryRow(
+		`SELECT upstream_block_attempts, upstream_blocked_at FROM api_keys WHERE id='k-def'`).
+		Scan(&attempts, &blockedAt))
+	require.Zero(t, attempts)
+	require.Nil(t, blockedAt, "新签发的密钥还没被吊销，谈不上封禁")
+}
