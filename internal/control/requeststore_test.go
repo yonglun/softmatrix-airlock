@@ -120,7 +120,10 @@ func TestRequestStoreCreateAndGet(t *testing.T) {
 	s := NewPostgresRequestStore(db)
 	ctx := context.Background()
 
-	require.NoError(t, s.Create(ctx, newKeyReq("r1", uid)))
+	req := newKeyReq("r1", uid)
+	require.NoError(t, s.Create(ctx, req))
+	require.False(t, req.CreatedAt.IsZero(),
+		"Create 必须把数据库算出的 created_at 读回调用方的结构体")
 
 	got, err := s.Get(ctx, "r1")
 	require.NoError(t, err)

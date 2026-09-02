@@ -63,16 +63,19 @@ func (s *postgresRequestStore) Create(ctx context.Context, r *Request) error {
 		}
 		models = raw
 	}
-	_, err := s.db.ExecContext(ctx, `
+	// RETURNING 把数据库算出的默认值（status、created_at）读回调用方的
+	// 结构体——否则响应里的 created_at 永远是零值，字段等于白写。
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO requests (id, kind, requester_id, org_id, reason,
 		                      key_name, models, target_key_id, bump_to_budget, bump_expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		RETURNING status, created_at`,
 		r.ID, r.Kind, r.RequesterID, r.OrgID, r.Reason,
-		r.KeyName, models, r.TargetKeyID, r.BumpToBudget, r.BumpExpiresAt)
+		r.KeyName, models, r.TargetKeyID, r.BumpToBudget, r.BumpExpiresAt).
+		Scan(&r.Status, &r.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("创建申请单失败: %w", err)
 	}
-	r.Status = RequestStatusPending
 	return nil
 }
 
