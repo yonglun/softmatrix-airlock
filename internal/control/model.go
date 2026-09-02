@@ -217,6 +217,12 @@ type KeyStore interface {
 	RevokeByOrgSubtree(ctx context.Context, orgPath string) (int64, error)
 	// RevokeAll 吊销全系统 active/pending 密钥，返回条数。
 	RevokeAll(ctx context.Context) (int64, error)
+	// ListRevokedUnblocked 捞出已吊销、尚未确认上游封禁、且未超重试上限的密钥。
+	ListRevokedUnblocked(ctx context.Context, maxAttempts, limit int) ([]*APIKey, error)
+	// MarkUpstreamBlocked 记下上游封禁已确认。
+	MarkUpstreamBlocked(ctx context.Context, id string) error
+	// RecordBlockAttempt 计一次失败尝试，不改状态。
+	RecordBlockAttempt(ctx context.Context, id string) error
 }
 
 // LiteLLMKeyAdmin 是签发所需的上游密钥能力。

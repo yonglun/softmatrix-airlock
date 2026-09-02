@@ -411,3 +411,64 @@ func TestRevokeAllCoversEverything(t *testing.T) {
 		require.Equal(t, "revoked", got.Status)
 	}
 }
+
+func TestListRevokedUnblockedOnlyPicksRevokedAndUnstamped(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "o", "/o")
+	seedKey(t, db, "k-live", "h1", "o", uid, "active")  // 没吊销，不该捞
+	seedKey(t, db, "k-todo", "h2", "o", uid, "revoked") // 该捞
+	seedKey(t, db, "k-done", "h3", "o", uid, "revoked") // 已盖戳，不该捞
+	require.NoError(t, keys.MarkUpstreamBlocked(ctx, "k-done"))
+
+	got, err := keys.ListRevokedUnblocked(ctx, 5, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "k-todo", got[0].ID)
+}
+
+func TestListRevokedUnblockedRespectsAttemptCap(t *testing.T) {
+	// 重试到上限后就不再捞它，免得一行坏数据每轮都刷日志。
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "o", "/o")
+	seedKey(t, db, "k-bad", "h1", "o", uid, "revoked")
+	for i := 0; i < 3; i++ {
+		require.NoError(t, keys.RecordBlockAttempt(ctx, "k-bad"))
+	}
+
+	got, err := keys.ListRevokedUnblocked(ctx, 3, 100)
+	require.NoError(t, err)
+	require.Empty(t, got, "尝试次数已达上限，不该再被捞出来")
+
+	// 把上限抬高就又能捞到了，证明拦住它的确实是次数而不是别的。
+	got, err = keys.ListRevokedUnblocked(ctx, 4, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, 3, got[0].UpstreamBlockAttempts)
+}
+
+func TestListRevokedUnblockedRespectsLimit(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "o", "/o")
+	seedKey(t, db, "k1", "h1", "o", uid, "revoked")
+	seedKey(t, db, "k2", "h2", "o", uid, "revoked")
+
+	got, err := keys.ListRevokedUnblocked(ctx, 5, 1)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "批量上限必须生效，积压时一轮不该把整张表拉进内存")
+}
+
+func TestMarkUpstreamBlockedStamps(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "o", "/o")
+	seedKey(t, db, "k1", "h1", "o", uid, "revoked")
+
+	require.NoError(t, keys.MarkUpstreamBlocked(ctx, "k1"))
+
+	got, err := keys.Get(ctx, "k1")
+	require.NoError(t, err)
+	require.NotNil(t, got.UpstreamBlockedAt)
+}

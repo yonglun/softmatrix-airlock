@@ -229,3 +229,38 @@ func (s *postgresKeyStore) RevokeAll(ctx context.Context) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+func (s *postgresKeyStore) ListRevokedUnblocked(
+	ctx context.Context, maxAttempts, limit int,
+) ([]*APIKey, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+keyColumns+` FROM api_keys
+		WHERE status = 'revoked' AND upstream_blocked_at IS NULL
+		  AND upstream_block_attempts < $1
+		ORDER BY created_at LIMIT $2`, maxAttempts, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查询待封禁密钥失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return collectKeys(rows)
+}
+
+func (s *postgresKeyStore) MarkUpstreamBlocked(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET upstream_blocked_at = $1 WHERE id = $2`,
+		time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("标记上游已封禁失败: %w", err)
+	}
+	return nil
+}
+
+func (s *postgresKeyStore) RecordBlockAttempt(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET upstream_block_attempts = upstream_block_attempts + 1
+		 WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("记录封禁尝试失败: %w", err)
+	}
+	return nil
+}
