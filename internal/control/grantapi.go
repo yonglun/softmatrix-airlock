@@ -191,10 +191,20 @@ func (a *GrantAPI) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(global) // 顺序稳定，前端渲染才不会每次都跳
 
+	// 工作台可见性由服务端算：前端拿不到角色的权限集（/api/roles 不返回它），
+	// 而 global_permissions 又会漏掉节点级授予——两条合起来意味着这个判定
+	// 只能放在这里（设计文档 D2）。
+	workbenches, err := Workbenches(r.Context(), a.resolver, subjectOf(u))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "计算工作台失败")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":               u,
 		"grants":             grants,
 		"global_permissions": global,
+		"workbenches":        workbenches,
 	})
 }
 
