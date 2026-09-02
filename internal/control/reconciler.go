@@ -178,8 +178,8 @@ func (k *PostgresKeyRevoker) RevokeByUsers(ctx context.Context, userIDs []string
 		return 0, err
 	}
 
-	// 上游封禁尽力而为：失败只记日志。本地已标记 revoked，
-	// Edge 下一个请求就会拒绝该密钥。
+	// 上游封禁尽力而为。成功即盖戳；失败留白，交给 BlockPendingUpstream
+	// 扫描收敛——本地已标记 revoked，Edge 下一个请求就会拒绝该密钥。
 	for _, t := range targets {
 		upstreamKey, derr := k.cipher.Decrypt(t.enc)
 		if derr != nil {
@@ -187,8 +187,14 @@ func (k *PostgresKeyRevoker) RevokeByUsers(ctx context.Context, userIDs []string
 			continue
 		}
 		if berr := k.admin.BlockKey(ctx, upstreamKey); berr != nil {
-			slog.Warn("封禁上游密钥失败，本地已吊销、Edge 已拒绝该密钥",
-				"key_id", t.id, "err", berr)
+			slog.Warn("封禁上游密钥失败，已留给兜底扫描重试", "key_id", t.id, "err", berr)
+			continue
+		}
+		if _, uerr := k.db.ExecContext(ctx,
+			`UPDATE api_keys SET upstream_blocked_at = $1 WHERE id = $2`,
+			time.Now().UTC(), t.id); uerr != nil {
+			slog.Warn("标记上游已封禁失败，兜底扫描会再来一次",
+				"key_id", t.id, "err", uerr)
 		}
 	}
 	return n, nil

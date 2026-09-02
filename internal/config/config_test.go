@@ -161,3 +161,25 @@ func TestApprovalWorkerIntervalAcceptsPositive(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 10*time.Second, cfg.ApprovalWorkerInterval)
 }
+
+func TestKeyMaintenanceDefault(t *testing.T) {
+	cfg, err := Load(func(string) string { return "" })
+	require.NoError(t, err)
+	require.Equal(t, time.Minute, cfg.KeyMaintenanceInterval)
+}
+
+func TestKeyMaintenanceIntervalRejectsNonPositive(t *testing.T) {
+	// 与前三个周期配置同样的理由：time.NewTicker 在 d <= 0 时 panic，
+	// 且 panic 在没有 recover 的 goroutine 里，会崩掉整个进程。
+	env := map[string]string{"KEY_MAINTENANCE_INTERVAL": "0"}
+	_, err := Load(func(k string) string { return env[k] })
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "KEY_MAINTENANCE_INTERVAL")
+}
+
+func TestKeyMaintenanceIntervalAcceptsPositive(t *testing.T) {
+	env := map[string]string{"KEY_MAINTENANCE_INTERVAL": "15s"}
+	cfg, err := Load(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	require.Equal(t, 15*time.Second, cfg.KeyMaintenanceInterval)
+}

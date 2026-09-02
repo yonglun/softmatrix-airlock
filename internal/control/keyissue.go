@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,6 +47,18 @@ type IssueRequest struct {
 }
 
 const upstreamKeyRandomBytes = 32
+
+const (
+	// defaultRotationWindow 是共存窗口的默认时长。
+	defaultRotationWindow = 24 * time.Hour
+	// maxRotationWindow 是上限。不设上限的话，填个 10 年就等于永不轮换。
+	maxRotationWindow = 30 * 24 * time.Hour
+	// maxBlockAttempts 是上游封禁的重试上限。
+	// 无限重试会让一行坏数据每轮都刷一次错误日志，到点要停下来交给人。
+	maxBlockAttempts = 5
+	// blockScanBatchSize 是单轮扫描的批量上限。
+	blockScanBatchSize = 100
+)
 
 // newUpstreamKey 生成一把我们自己决定值的上游密钥。
 //
@@ -176,8 +190,14 @@ func (i *KeyIssuer) Revoke(ctx context.Context, id string) error {
 		return nil
 	}
 	if err := i.deps.Admin.BlockKey(ctx, upstreamKey); err != nil {
-		slog.Warn("封禁上游密钥失败，本地已吊销、Edge 已拒绝该密钥",
+		// 留白不盖戳，交给 BlockPendingUpstream 扫描重试。
+		// 本地已吊销、Edge 已经在拒，所以这里不让整体失败。
+		slog.Warn("封禁上游密钥失败，已留给兜底扫描重试",
 			"key_id", id, "err", err)
+		return nil
+	}
+	if err := i.deps.Keys.MarkUpstreamBlocked(ctx, id); err != nil {
+		slog.Warn("标记上游已封禁失败，兜底扫描会再来一次", "key_id", id, "err", err)
 	}
 	return nil
 }
@@ -206,4 +226,100 @@ func (i *KeyIssuer) CleanupStalePending(ctx context.Context, olderThan time.Dura
 		}
 	}
 	return n, nil
+}
+
+// Rotate 换发客户端凭据，返回新的 ak- 明文（仅此一次）与轮换后的记录。
+//
+// 不调用上游：ak- 到 sk- 的映射完全由控制面持有，换掉客户端那一端
+// 根本不需要惊动 LiteLLM。因此轮换不可能因为上游宕机而失败——这是
+// P1.3a「本地记录优先」推到尽头的形态。
+//
+// 上游密钥保持不变是刻意的（设计文档 D2）：它加密存放、从不离开控制面，
+// 而 ak- 散落在客户端的 .env、CI secrets 与几十份配置里，需要被限定
+// 泄漏后可用时长的是后者。保持同一把上游密钥也让预算桶保持连续。
+func (i *KeyIssuer) Rotate(
+	ctx context.Context, id string, window time.Duration,
+) (string, *APIKey, error) {
+	if window == 0 {
+		window = defaultRotationWindow
+	}
+	if window < 0 || window > maxRotationWindow {
+		return "", nil, ErrWindowTooLong
+	}
+
+	plaintext, hash, prefix, err := apikey.Generate()
+	if err != nil {
+		return "", nil, err
+	}
+	if err := i.deps.Keys.Rotate(ctx, id, hash, prefix, time.Now().Add(window)); err != nil {
+		return "", nil, err
+	}
+
+	k, err := i.deps.Keys.Get(ctx, id)
+	if err != nil {
+		return "", nil, err
+	}
+	return plaintext, k, nil
+}
+
+// BlockPendingUpstream 给已吊销但尚未确认封禁的密钥补做上游封禁，
+// 返回本轮成功收敛的条数。
+//
+// 批量吊销只做本地 UPDATE 就返回（上游没有批量封禁接口，探针 P3 已证：
+// /key/block 只收单数 key），因此上游那一半必须由这个扫描收敛。
+// 它同时兜住单把吊销与离职对账里内联封禁失败的情况——在此之前，
+// 那种失败只记一行 WARN 且永不重试，纵深就此静默消失。
+func (i *KeyIssuer) BlockPendingUpstream(ctx context.Context) (int, error) {
+	list, err := i.deps.Keys.ListRevokedUnblocked(ctx, maxBlockAttempts, blockScanBatchSize)
+	if err != nil {
+		return 0, err
+	}
+
+	done, failures := 0, 0
+	for _, k := range list {
+		upstreamKey, derr := i.deps.Cipher.Decrypt(k.UpstreamKeyEnc)
+		if derr != nil {
+			// 解不开就永远解不开，计一次尝试让它自然走到上限。
+			slog.Warn("解密上游密钥失败，跳过", "key_id", k.ID, "err", derr)
+			i.recordBlockFailure(ctx, k)
+			failures++
+			continue
+		}
+
+		berr := i.deps.Admin.BlockKey(ctx, upstreamKey)
+		if berr != nil && !isUpstreamNotFound(berr) {
+			slog.Warn("兜底封禁失败，下一轮重试", "key_id", k.ID, "err", berr)
+			i.recordBlockFailure(ctx, k)
+			failures++
+			continue
+		}
+		// 404 视为已经不在了（探针 P1），与封成功同样处理。
+		if err := i.deps.Keys.MarkUpstreamBlocked(ctx, k.ID); err != nil {
+			slog.Warn("标记上游已封禁失败", "key_id", k.ID, "err", err)
+			continue
+		}
+		done++
+	}
+	if failures > 0 {
+		return done, fmt.Errorf("有 %d 把密钥的上游封禁失败", failures)
+	}
+	return done, nil
+}
+
+func (i *KeyIssuer) recordBlockFailure(ctx context.Context, k *APIKey) {
+	if err := i.deps.Keys.RecordBlockAttempt(ctx, k.ID); err != nil {
+		slog.Warn("记录封禁尝试失败", "key_id", k.ID, "err", err)
+		return
+	}
+	if k.UpstreamBlockAttempts+1 >= maxBlockAttempts {
+		slog.Error("上游封禁重试耗尽，已停止重试，请人工处理",
+			"key_id", k.ID, "attempts", k.UpstreamBlockAttempts+1)
+	}
+}
+
+// isUpstreamNotFound 判断上游是否回了 404。
+// 探针 P1：对不存在的 key，/key/block 返回 404 "Key not found."。
+func isUpstreamNotFound(err error) bool {
+	var apiErr *litellm.APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
 }

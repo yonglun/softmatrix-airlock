@@ -3,11 +3,13 @@ package control
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/softmatrix/airlock/internal/apikey"
 	"github.com/softmatrix/airlock/internal/cryptobox"
 	"github.com/softmatrix/airlock/internal/litellm"
 )
@@ -296,4 +298,250 @@ func TestCleanupStalePendingIgnoresFreshRows(t *testing.T) {
 
 	_, err = keys.Get(ctx, "k-fresh")
 	require.NoError(t, err)
+}
+
+func TestRotateReturnsNewPlaintextAndKeepsUpstreamKey(t *testing.T) {
+	// D1/D2 的核心：轮换只换客户端凭据，上游密钥原封不动——
+	// 预算桶因此连续，不会在窗口期裂成两份。
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	oldPlain, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "轮换测试", Models: []string{},
+	})
+	require.NoError(t, err)
+	before, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	admin.resetCalls()
+
+	newPlain, rotated, err := iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+
+	require.NotEqual(t, oldPlain, newPlain, "必须换出一把新的客户端凭据")
+	require.True(t, strings.HasPrefix(newPlain, "ak-"))
+	require.Equal(t, k.ID, rotated.ID, "密钥身份跨轮换稳定")
+	require.Equal(t, before.UpstreamKeyEnc, rotated.UpstreamKeyEnc,
+		"上游密钥必须原封不动——预算桶靠它保持连续")
+	require.Empty(t, admin.callsSnapshot(), "轮换不调用上游")
+}
+
+func TestRotateStoresOnlyHashOfNewPlaintext(t *testing.T) {
+	iss, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+
+	newPlain, _, err := iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+
+	var stored string
+	require.NoError(t, db.QueryRow(
+		`SELECT key_hash FROM api_keys WHERE id=$1`, k.ID).Scan(&stored))
+	require.NotEqual(t, newPlain, stored, "库里绝不能出现明文")
+	require.Equal(t, apikey.Hash(newPlain), stored)
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.PrevKeyHash)
+}
+
+func TestRotateRejectsRevokedKey(t *testing.T) {
+	iss, _, _, _, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, iss.Revoke(ctx, k.ID))
+
+	_, _, err = iss.Rotate(ctx, k.ID, time.Hour)
+	require.ErrorIs(t, err, ErrKeyNotActive)
+}
+
+func TestRotateDefaultsAndCapsWindow(t *testing.T) {
+	iss, _, _, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+
+	// 0 表示用默认值。
+	_, _, err = iss.Rotate(ctx, k.ID, 0)
+	require.NoError(t, err)
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(defaultRotationWindow),
+		*got.PrevKeyExpiresAt, time.Minute)
+
+	// 超过上限直接拒绝——否则填个 10 年就把轮换变成了摆设。
+	_, _, err = iss.Rotate(ctx, k.ID, maxRotationWindow+time.Hour)
+	require.ErrorIs(t, err, ErrWindowTooLong)
+}
+
+func TestRotateTwiceKeepsOnlyOneGenerationOfGrace(t *testing.T) {
+	// 行里只有一个 prev 位置：窗口内二次轮换会让最初那把当场失效。
+	// 这是刻意的——连轮两次通常意味着第一次轮出来的也泄漏了。
+	iss, _, _, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	firstPlain, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+
+	secondPlain, _, err := iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+	_, _, err = iss.Rotate(ctx, k.ID, time.Hour)
+	require.NoError(t, err)
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.Equal(t, apikey.Hash(secondPlain), *got.PrevKeyHash,
+		"prev 位置上应是上一次轮出来的那把")
+	require.NotEqual(t, apikey.Hash(firstPlain), *got.PrevKeyHash,
+		"最初那把必须当场失效")
+}
+
+func TestBlockPendingUpstreamBlocksAndStamps(t *testing.T) {
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	// 造出「本地已吊销、上游没封成」的状态：直接改状态，绕开 Revoke。
+	require.NoError(t, keys.Revoke(ctx, k.ID))
+	admin.resetCalls()
+
+	n, err := iss.BlockPendingUpstream(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.UpstreamBlockedAt, "封成了就要盖戳")
+	require.Len(t, admin.callsSnapshot(), 1)
+}
+
+func TestBlockPendingUpstreamIsIdempotentAcrossRuns(t *testing.T) {
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, keys.Revoke(ctx, k.ID))
+
+	_, err = iss.BlockPendingUpstream(ctx)
+	require.NoError(t, err)
+	admin.resetCalls()
+
+	n, err := iss.BlockPendingUpstream(ctx)
+	require.NoError(t, err)
+	require.Zero(t, n)
+	require.Empty(t, admin.callsSnapshot(), "盖过戳的不该再动上游")
+}
+
+func TestBlockPendingUpstreamTreats404AsDone(t *testing.T) {
+	// 探针 P1：上游对不存在的 key 返回 404。那把密钥本来就不在了，
+	// 当作封成功盖戳，否则它会一直占着重试额度。
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, keys.Revoke(ctx, k.ID))
+	admin.blockNotFound = true
+
+	n, err := iss.BlockPendingUpstream(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.UpstreamBlockedAt)
+}
+
+func TestBlockPendingUpstreamRetriesOnFailure(t *testing.T) {
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, keys.Revoke(ctx, k.ID))
+	admin.blockErr = errUpstreamDown
+
+	_, err = iss.BlockPendingUpstream(ctx)
+	require.Error(t, err)
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.Nil(t, got.UpstreamBlockedAt, "没封成就不能盖戳")
+	require.Equal(t, 1, got.UpstreamBlockAttempts)
+
+	// 上游恢复后下一轮应当收敛。
+	admin.blockErr = nil
+	n, err := iss.BlockPendingUpstream(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
+func TestBlockPendingUpstreamGivesUpAfterMaxAttempts(t *testing.T) {
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, keys.Revoke(ctx, k.ID))
+	admin.blockErr = errUpstreamDown
+
+	for i := 0; i < maxBlockAttempts; i++ {
+		_, _ = iss.BlockPendingUpstream(ctx)
+	}
+	admin.resetCalls()
+
+	n, err := iss.BlockPendingUpstream(ctx)
+	require.NoError(t, err)
+	require.Zero(t, n)
+	require.Empty(t, admin.callsSnapshot(),
+		"重试耗尽后就停下来交给人，不让一行坏数据每轮刷日志")
+}
+
+func TestRevokeStampsUpstreamBlockedOnSuccess(t *testing.T) {
+	// 单把吊销走内联封禁：成功即盖戳，扫描下一轮就不用再管它。
+	iss, _, _, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, iss.Revoke(ctx, k.ID))
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.UpstreamBlockedAt)
+}
+
+func TestRevokeLeavesStampEmptyWhenUpstreamFails(t *testing.T) {
+	// 上游失败不该让吊销失败（既有语义），但必须留白让扫描重试——
+	// 这正是本阶段补上的那个缺口。
+	iss, _, admin, keys, _, uid := issuerFixture(t)
+	ctx := context.Background()
+	_, k, err := iss.Issue(ctx, IssueRequest{
+		OrgID: "gw", UserID: uid, Name: "x", Models: []string{},
+	})
+	require.NoError(t, err)
+	admin.blockErr = errUpstreamDown
+
+	require.NoError(t, iss.Revoke(ctx, k.ID), "上游失败不影响吊销生效")
+
+	got, err := keys.Get(ctx, k.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", got.Status)
+	require.Nil(t, got.UpstreamBlockedAt, "没封成就留白，交给扫描")
 }

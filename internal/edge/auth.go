@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -67,6 +68,17 @@ func Authenticate(store apikey.Store) func(http.Handler) http.Handler {
 			case err != nil:
 				writeAuthError(w, http.StatusForbidden, "key_unusable", "密钥不可用")
 				return
+			}
+
+			// 客户端若到窗口结束都没换上新凭据，到期瞬间会集体 401。
+			// 打一条日志让运维能提前看到，而不是等故障发生。
+			// 刻意只打日志、不写库：鉴权是热路径、目前零写入，
+			// 为一个观测需求给每个请求加一次 DB 写不划算。
+			if key.ViaPrevKey && key.PrevKeyExpiresAt != nil {
+				slog.Warn("客户端仍在使用轮换前的旧凭据",
+					"key_id", key.ID,
+					"prev_expires_at", key.PrevKeyExpiresAt.UTC(),
+					"remaining", time.Until(*key.PrevKeyExpiresAt).Round(time.Second))
 			}
 
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), keyCtxKey, key)))

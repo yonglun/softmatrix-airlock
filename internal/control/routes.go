@@ -327,5 +327,25 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "POST /api/requests/{id}/claim", Access: AccessAuthenticated,
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleClaim }),
 		},
+
+		// ---- 轮换与批量吊销 ----
+		{
+			// 路径里只有密钥 ID，中间件拿不到它所属的节点，
+			// 判定下沉到 HandleRotate 自己做（责任人本人或节点上的 key:write）。
+			Pattern: "POST /api/keys/{id}/rotate", Access: AccessAuthenticated,
+			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRotate }),
+		},
+		{
+			Pattern: "POST /api/orgs/{id}/keys/revoke", Access: AccessPermission,
+			Permission: authz.PermKeyWrite, Target: TargetFromPath("id"),
+			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevokeOrg }),
+		},
+		{
+			// 全系统最具破坏性的一次调用，单开一个全局权限：
+			// 塞进 platform:configure 里等于谁能改配置谁就能清空全公司凭据。
+			Pattern: "POST /api/keys/revoke-all", Access: AccessPermission,
+			Permission: authz.PermKeyRevokeAll, Target: TargetGlobal(),
+			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevokeAll }),
+		},
 	}
 }

@@ -87,6 +87,9 @@ var (
 	ErrRequestNotApproved = errors.New("申请单未处于已批准状态")
 	ErrNotRequester       = errors.New("只有申请人本人可以领取")
 	ErrPermissionDenied   = errors.New("没有执行该操作的权限")
+
+	ErrKeyNotActive  = errors.New("密钥不处于可用状态")
+	ErrWindowTooLong = errors.New("共存窗口超过上限")
 )
 
 type UserStore interface {
@@ -184,7 +187,15 @@ type APIKey struct {
 	RPMLimit       *int
 	TPMLimit       *int
 	ExpiresAt      *time.Time
-	CreatedAt      time.Time
+	// 轮换：共存窗口内旧凭据仍然可用。两列同生同死，
+	// 由 api_keys_prev_shape_check 强制。
+	PrevKeyHash      *string
+	PrevKeyExpiresAt *time.Time
+	RotatedAt        *time.Time
+	// 上游封禁的记账：吊销本地立即生效，上游封禁由扫描兜底（Task 7、8）。
+	UpstreamBlockedAt     *time.Time
+	UpstreamBlockAttempts int
+	CreatedAt             time.Time
 }
 
 type KeyStore interface {
@@ -196,6 +207,22 @@ type KeyStore interface {
 	Delete(ctx context.Context, id string) error
 	// ListStalePending 返回滞留超过 olderThan 的 pending 密钥。
 	ListStalePending(ctx context.Context, olderThan time.Duration) ([]*APIKey, error)
+	// Rotate 换发客户端凭据：新哈希写进 key_hash，旧哈希挪到 prev_key_hash。
+	// 只在 active 时生效，否则返回 ErrKeyNotActive。
+	Rotate(ctx context.Context, id, newHash, newPrefix string, prevExpiresAt time.Time) error
+	// RetireExpiredPrevKeys 把过期的 prev_* 两列置空，返回处理行数。纯卫生——
+	// 到期判断在 Edge 的 SQL 里，正确性不依赖这个方法跑过。
+	RetireExpiredPrevKeys(ctx context.Context, now time.Time) (int64, error)
+	// RevokeByOrgSubtree 吊销该路径子树下全部 active/pending 密钥，返回条数。
+	RevokeByOrgSubtree(ctx context.Context, orgPath string) (int64, error)
+	// RevokeAll 吊销全系统 active/pending 密钥，返回条数。
+	RevokeAll(ctx context.Context) (int64, error)
+	// ListRevokedUnblocked 捞出已吊销、尚未确认上游封禁、且未超重试上限的密钥。
+	ListRevokedUnblocked(ctx context.Context, maxAttempts, limit int) ([]*APIKey, error)
+	// MarkUpstreamBlocked 记下上游封禁已确认。
+	MarkUpstreamBlocked(ctx context.Context, id string) error
+	// RecordBlockAttempt 计一次失败尝试，不改状态。
+	RecordBlockAttempt(ctx context.Context, id string) error
 }
 
 // LiteLLMKeyAdmin 是签发所需的上游密钥能力。

@@ -19,14 +19,18 @@ func NewPostgresKeyStore(db *sql.DB) KeyStore {
 
 const keyColumns = `id, key_hash, key_prefix, org_id, user_id, name,
 	upstream_key_enc, status, models, max_budget, budget_duration,
-	rpm_limit, tpm_limit, expires_at, created_at`
+	rpm_limit, tpm_limit, expires_at,
+	prev_key_hash, prev_key_expires_at, rotated_at,
+	upstream_blocked_at, upstream_block_attempts, created_at`
 
 func scanKey(row interface{ Scan(...any) error }) (*APIKey, error) {
 	var k APIKey
 	var models []byte
 	if err := row.Scan(&k.ID, &k.KeyHash, &k.KeyPrefix, &k.OrgID, &k.UserID, &k.Name,
 		&k.UpstreamKeyEnc, &k.Status, &models, &k.MaxBudget, &k.BudgetDuration,
-		&k.RPMLimit, &k.TPMLimit, &k.ExpiresAt, &k.CreatedAt); err != nil {
+		&k.RPMLimit, &k.TPMLimit, &k.ExpiresAt,
+		&k.PrevKeyHash, &k.PrevKeyExpiresAt, &k.RotatedAt,
+		&k.UpstreamBlockedAt, &k.UpstreamBlockAttempts, &k.CreatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(models, &k.Models); err != nil {
@@ -145,4 +149,118 @@ func orEmptyStrings(v []string) []string {
 		return []string{}
 	}
 	return v
+}
+
+// Rotate 换发客户端凭据。
+//
+// WHERE status = 'active' 是乐观并发守卫，与 P1.3b 的 Decide/MarkExecuted
+// 同一套：已吊销或仍 pending 的密钥不能轮换。
+//
+// 行里只有一个 prev_key_hash 的位置，因此窗口内再次轮换会让上一次轮出来的
+// 成为新的 prev、最初那把当场失效——「最多只保留一代宽限」。这是刻意的：
+// 会连着轮两次通常意味着第一次轮出来的也泄漏了。
+func (s *postgresKeyStore) Rotate(
+	ctx context.Context, id, newHash, newPrefix string, prevExpiresAt time.Time,
+) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys SET
+			key_hash = $1, key_prefix = $2,
+			prev_key_hash = key_hash, prev_key_expires_at = $3,
+			rotated_at = $4
+		WHERE id = $5 AND status = 'active'`,
+		newHash, newPrefix, prevExpiresAt.UTC(), time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("轮换密钥失败: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// 分辨「不存在」与「状态不对」，让调用方能返回正确的状态码。
+		if _, gerr := s.Get(ctx, id); gerr != nil {
+			return gerr
+		}
+		return ErrKeyNotActive
+	}
+	return nil
+}
+
+func (s *postgresKeyStore) RetireExpiredPrevKeys(
+	ctx context.Context, now time.Time,
+) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys SET prev_key_hash = NULL, prev_key_expires_at = NULL
+		WHERE prev_key_hash IS NOT NULL AND prev_key_expires_at <= $1`, now.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("清理过期旧凭据失败: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// RevokeByOrgSubtree 按物化路径前缀吊销整棵子树。
+//
+// 必须加分隔符再比前缀：/root/rd 是 /root/rd2 的前缀，但 rd2 并不在 rd 的
+// 子树里。这个陷阱在 P1.2b 的权限判定与 P1.3b 的审批人查找里各踩过一次。
+//
+// pending 也要覆盖：那些密钥上游可能已经建成。
+func (s *postgresKeyStore) RevokeByOrgSubtree(
+	ctx context.Context, orgPath string,
+) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys SET status = 'revoked'
+		WHERE status IN ('active','pending')
+		  AND org_id IN (
+		      SELECT id FROM organizations
+		      WHERE path = $1 OR path LIKE $1 || '/%'
+		  )`, orgPath)
+	if err != nil {
+		return 0, fmt.Errorf("按子树吊销密钥失败: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// RevokeAll 是 break glass：吊销全系统密钥。不可逆。
+func (s *postgresKeyStore) RevokeAll(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET status = 'revoked' WHERE status IN ('active','pending')`)
+	if err != nil {
+		return 0, fmt.Errorf("全局吊销密钥失败: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+func (s *postgresKeyStore) ListRevokedUnblocked(
+	ctx context.Context, maxAttempts, limit int,
+) ([]*APIKey, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+keyColumns+` FROM api_keys
+		WHERE status = 'revoked' AND upstream_blocked_at IS NULL
+		  AND upstream_block_attempts < $1
+		ORDER BY created_at LIMIT $2`, maxAttempts, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查询待封禁密钥失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return collectKeys(rows)
+}
+
+func (s *postgresKeyStore) MarkUpstreamBlocked(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET upstream_blocked_at = $1 WHERE id = $2`,
+		time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("标记上游已封禁失败: %w", err)
+	}
+	return nil
+}
+
+func (s *postgresKeyStore) RecordBlockAttempt(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET upstream_block_attempts = upstream_block_attempts + 1
+		 WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("记录封禁尝试失败: %w", err)
+	}
+	return nil
 }
