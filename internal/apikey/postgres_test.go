@@ -32,6 +32,12 @@ func seed(t *testing.T, db *sql.DB, c *cryptobox.Cipher, hash, status string, ex
 	t.Helper()
 	ctx := context.Background()
 	for _, stmt := range []string{
+		// requests.target_key_id / issued_key_id 都引用 api_keys(id)（P1.3b 引入）。
+		// go test ./... 默认并发跑各包的测试二进制，都打同一个真实 Postgres；
+		// internal/control 的测试可能正好留着引用某把 api_keys 行的 requests 行，
+		// 这里的无条件 DELETE FROM api_keys 就会撞上外键违反。
+		// 先清掉这两张表，消掉这个跨包竞态。
+		`DELETE FROM notifications`, `DELETE FROM requests`,
 		`DELETE FROM api_keys`, `DELETE FROM organizations WHERE id='gw'`, `DELETE FROM users`,
 	} {
 		_, err := db.ExecContext(ctx, stmt)
