@@ -19,6 +19,9 @@ type fakeKeyAdmin struct {
 	blockErr    error
 	deleteErr   error
 	updateErr   error
+	// blockNotFound 让 BlockKey 模拟探针 P1 的真实形态：
+	// 上游对不存在的 key 返回 404。
+	blockNotFound bool
 
 	calls []string
 }
@@ -53,6 +56,10 @@ func (f *fakeKeyAdmin) BlockKey(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "block:"+key)
+	if f.blockNotFound {
+		// 探针 P1 的真实形态：上游对不存在的 key 返回 404。
+		return &litellm.APIError{Status: 404, Body: `{"error":{"message":"Key not found."}}`}
+	}
 	return f.blockErr
 }
 
