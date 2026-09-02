@@ -82,6 +82,13 @@ services:
     volumes:
       - ./openldap:/ldifs:ro
 
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      # 1025 收信（SMTP），8025 是网页界面，验收时用它肉眼确认邮件真收到了
+      - "${MAILPIT_SMTP_PORT}:1025"
+      - "${MAILPIT_UI_PORT}:8025"
+
 volumes:
   pgdata:
   chdata:
