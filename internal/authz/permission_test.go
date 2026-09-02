@@ -43,7 +43,7 @@ func TestOrgPermissionsAreMarkedOrg(t *testing.T) {
 
 func TestAllIsSortedAndComplete(t *testing.T) {
 	all := All()
-	require.Len(t, all, 13, "权限总数与设计文档 §4 的清单一致（P1.3b 新增 key:request）")
+	require.Len(t, all, 14, "权限总数与设计文档 §4 的清单一致（P1.3c 新增 key:revoke_all）")
 
 	for i := 1; i < len(all); i++ {
 		require.Less(t, all[i-1].Key, all[i].Key,
@@ -68,4 +68,17 @@ func TestKeyRequestIsOrgScoped(t *testing.T) {
 	def, ok := Lookup(PermKeyRequest)
 	require.True(t, ok, "%s 未注册", PermKeyRequest)
 	require.Equal(t, ScopeOrg, def.Scope)
+}
+
+func TestKeyRevokeAllIsGlobalScoped(t *testing.T) {
+	// 紧急全局吊销不绑定任何节点，必须是全局权限——
+	// 若做成 ScopeOrg，在任意一个叶子节点上拿到它就等于能清空全公司。
+	def, ok := Lookup(PermKeyRevokeAll)
+	require.True(t, ok, "%s 未注册", PermKeyRevokeAll)
+	require.Equal(t, ScopeGlobal, def.Scope)
+}
+
+func TestKeyRevokeAllIsNotInOrgAdmin(t *testing.T) {
+	// 组织管理员管的是自己那棵子树，不该顺带获得清空全系统的能力。
+	require.NotContains(t, roleByID(t, RoleOrgAdmin).Permissions, PermKeyRevokeAll)
 }
