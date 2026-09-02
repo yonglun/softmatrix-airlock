@@ -213,6 +213,10 @@ type KeyStore interface {
 	// RetireExpiredPrevKeys 把过期的 prev_* 两列置空，返回处理行数。纯卫生——
 	// 到期判断在 Edge 的 SQL 里，正确性不依赖这个方法跑过。
 	RetireExpiredPrevKeys(ctx context.Context, now time.Time) (int64, error)
+	// RevokeByOrgSubtree 吊销该路径子树下全部 active/pending 密钥，返回条数。
+	RevokeByOrgSubtree(ctx context.Context, orgPath string) (int64, error)
+	// RevokeAll 吊销全系统 active/pending 密钥，返回条数。
+	RevokeAll(ctx context.Context) (int64, error)
 }
 
 // LiteLLMKeyAdmin 是签发所需的上游密钥能力。

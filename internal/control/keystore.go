@@ -197,3 +197,35 @@ func (s *postgresKeyStore) RetireExpiredPrevKeys(
 	}
 	return res.RowsAffected()
 }
+
+// RevokeByOrgSubtree 按物化路径前缀吊销整棵子树。
+//
+// 必须加分隔符再比前缀：/root/rd 是 /root/rd2 的前缀，但 rd2 并不在 rd 的
+// 子树里。这个陷阱在 P1.2b 的权限判定与 P1.3b 的审批人查找里各踩过一次。
+//
+// pending 也要覆盖：那些密钥上游可能已经建成。
+func (s *postgresKeyStore) RevokeByOrgSubtree(
+	ctx context.Context, orgPath string,
+) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys SET status = 'revoked'
+		WHERE status IN ('active','pending')
+		  AND org_id IN (
+		      SELECT id FROM organizations
+		      WHERE path = $1 OR path LIKE $1 || '/%'
+		  )`, orgPath)
+	if err != nil {
+		return 0, fmt.Errorf("按子树吊销密钥失败: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// RevokeAll 是 break glass：吊销全系统密钥。不可逆。
+func (s *postgresKeyStore) RevokeAll(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET status = 'revoked' WHERE status IN ('active','pending')`)
+	if err != nil {
+		return 0, fmt.Errorf("全局吊销密钥失败: %w", err)
+	}
+	return res.RowsAffected()
+}

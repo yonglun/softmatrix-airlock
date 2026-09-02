@@ -320,3 +320,94 @@ func TestKeyStoreRetireExpiredPrevKeys(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, live.PrevKeyHash, "没到期的不该动")
 }
+
+// seedOrg 造一个组织节点（物化路径直接给定）。
+func seedOrg(t *testing.T, db *sql.DB, id, path string) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO organizations (id, name, path) VALUES ($1,$1,$2)`, id, path)
+	require.NoError(t, err)
+}
+
+func TestRevokeByOrgSubtreeCoversDescendants(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "root", "/root")
+	seedOrg(t, db, "rd", "/root/rd")
+	seedOrg(t, db, "gw2", "/root/rd/gw2")
+	seedKey(t, db, "k-rd", "h-rd", "rd", uid, "active")
+	seedKey(t, db, "k-deep", "h-deep", "gw2", uid, "active")
+
+	n, err := keys.RevokeByOrgSubtree(ctx, "/root/rd")
+	require.NoError(t, err)
+	require.Equal(t, int64(2), n, "节点自身与后代都要吊销")
+
+	for _, id := range []string{"k-rd", "k-deep"} {
+		got, err := keys.Get(ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, "revoked", got.Status)
+	}
+}
+
+func TestRevokeByOrgSubtreeSpareSiblingWithSamePrefix(t *testing.T) {
+	// 第三次遇到这个陷阱（P1.2b 权限判定、P1.3b 审批人查找各踩过一次）：
+	// /root/rd 是 /root/rd2 的前缀，但 rd2 并不在 rd 的子树里。
+	// 必须加分隔符再比前缀，否则会把无关部门的密钥一起吊掉。
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "root", "/root")
+	seedOrg(t, db, "rd", "/root/rd")
+	seedOrg(t, db, "rd2", "/root/rd2")
+	seedKey(t, db, "k-rd", "h-rd", "rd", uid, "active")
+	seedKey(t, db, "k-rd2", "h-rd2", "rd2", uid, "active")
+
+	n, err := keys.RevokeByOrgSubtree(ctx, "/root/rd")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+
+	sibling, err := keys.Get(ctx, "k-rd2")
+	require.NoError(t, err)
+	require.Equal(t, "active", sibling.Status, "同前缀兄弟节点必须毫发无伤")
+}
+
+func TestRevokeByOrgSubtreeCoversPendingToo(t *testing.T) {
+	// 正在签发中的密钥上游可能已经建成，批量吊销必须一并覆盖。
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "rd", "/rd")
+	seedKey(t, db, "k-pending", "h-pending", "rd", uid, "pending")
+
+	n, err := keys.RevokeByOrgSubtree(ctx, "/rd")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+}
+
+func TestRevokeByOrgSubtreeSkipsAlreadyRevoked(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "rd", "/rd")
+	seedKey(t, db, "k-dead", "h-dead", "rd", uid, "revoked")
+
+	n, err := keys.RevokeByOrgSubtree(ctx, "/rd")
+	require.NoError(t, err)
+	require.Zero(t, n, "已吊销的不该重复计数")
+}
+
+func TestRevokeAllCoversEverything(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "a", "/a")
+	seedOrg(t, db, "b", "/b")
+	seedKey(t, db, "k-a", "h-a", "a", uid, "active")
+	seedKey(t, db, "k-b", "h-b", "b", uid, "pending")
+
+	n, err := keys.RevokeAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), n)
+
+	for _, id := range []string{"k-a", "k-b"} {
+		got, err := keys.Get(ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, "revoked", got.Status)
+	}
+}
