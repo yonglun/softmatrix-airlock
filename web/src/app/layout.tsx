@@ -1,5 +1,5 @@
 import type { Metadata } from 'next'
-import { ConfigProvider } from 'antd'
+import { App as AntdApp, ConfigProvider } from 'antd'
 import { AntdRegistry } from '@ant-design/nextjs-registry'
 import zhCN from 'antd/locale/zh_CN'
 import { SessionProvider } from '@/lib/session'
@@ -14,7 +14,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           {/* 界面中文优先：antd 的 zh_CN 是官方内置的，
               用户可见文案集中在各组件里，将来加第二语言时替换这一层。 */}
           <ConfigProvider locale={zhCN}>
-            <SessionProvider>{children}</SessionProvider>
+            <AntdApp>
+              <SessionProvider>{children}</SessionProvider>
+            </AntdApp>
           </ConfigProvider>
         </AntdRegistry>
       </body>
