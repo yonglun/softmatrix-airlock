@@ -61,19 +61,6 @@ export type ApiRequest = {
   created_at: string
 }
 
-/** 领取新密钥的响应：keyView 加一个只出现这一次的明文 */
-export type ClaimedKey = {
-  id: string
-  key_prefix: string
-  org_id: string
-  user_id: string
-  name: string
-  status: string
-  models: string[]
-  created_at: string
-  key: string
-}
-
 /** GET /api/orgs/{id}/keys、GET /api/keys/mine —— snake_case（keyView 有 json tag） */
 export type ApiKey = {
   id: string
