@@ -219,6 +219,8 @@ type KeyStore interface {
 	// （管理员要看得见历史）。节点选择子句与 RevokeByOrgSubtree
 	// 逐字相同——它是子树吊销的预览，两处一旦分叉，预览就在撒谎。
 	ListByOrgSubtree(ctx context.Context, orgPath string) ([]*APIKey, error)
+	// ListByUser 返回该用户作为责任人的全部密钥，跨节点。
+	ListByUser(ctx context.Context, userID string) ([]*APIKey, error)
 	// RevokeAll 吊销全系统 active/pending 密钥，返回条数。
 	RevokeAll(ctx context.Context) (int64, error)
 	// ListRevokedUnblocked 捞出已吊销、尚未确认上游封禁、且未超重试上限的密钥。

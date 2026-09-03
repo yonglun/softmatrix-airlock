@@ -537,3 +537,33 @@ func TestListByOrgSubtreeEmptyReturnsEmptySlice(t *testing.T) {
 	require.NotNil(t, got, "空结果要是空切片，否则 JSON 会序列化成 null")
 	require.Empty(t, got)
 }
+
+func TestListByUserReturnsOnlyOwnKeysAcrossOrgs(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	other := seedUserID(t, db, "list-by-user-other")
+	seedOrg(t, db, "a", "/a")
+	seedOrg(t, db, "b", "/b")
+	seedKey(t, db, "k-mine-a", "h1", "a", uid, "active")
+	seedKey(t, db, "k-mine-b", "h2", "b", uid, "active")
+	seedKey(t, db, "k-theirs", "h3", "a", other, "active")
+
+	got, err := keys.ListByUser(ctx, uid)
+	require.NoError(t, err)
+	ids := []string{}
+	for _, k := range got {
+		ids = append(ids, k.ID)
+	}
+	require.ElementsMatch(t, []string{"k-mine-a", "k-mine-b"}, ids,
+		"跨节点的本人密钥都要在，别人的一把都不能有")
+}
+
+func TestListByUserEmptyReturnsEmptySlice(t *testing.T) {
+	_, _, _, keys, db, _ := issuerFixture(t)
+	nobody := seedUserID(t, db, "list-by-user-nobody")
+
+	got, err := keys.ListByUser(context.Background(), nobody)
+	require.NoError(t, err)
+	require.NotNil(t, got, "空结果要是空切片，否则 JSON 会序列化成 null")
+	require.Empty(t, got)
+}

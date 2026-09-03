@@ -242,6 +242,18 @@ func (s *postgresKeyStore) ListByOrgSubtree(
 	return collectKeys(rows)
 }
 
+// ListByUser 返回该用户作为责任人的全部密钥，跨节点。
+func (s *postgresKeyStore) ListByUser(ctx context.Context, userID string) ([]*APIKey, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+keyColumns+` FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("查询本人密钥失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return collectKeys(rows)
+}
+
 // RevokeAll 是 break glass：吊销全系统密钥。不可逆。
 func (s *postgresKeyStore) RevokeAll(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
