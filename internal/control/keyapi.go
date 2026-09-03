@@ -151,14 +151,23 @@ func (a *KeyAPI) HandleRevoke(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
 		return
 	}
-	allowed, err := a.resolver.Can(r.Context(), subjectOf(u), authz.PermKeyWrite, &k.OrgID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
-		return
-	}
-	if !allowed {
-		writeError(w, http.StatusForbidden, "permission_denied", "没有吊销该密钥的权限")
-		return
+	// 判定与 HandleRotate 对齐：责任人本人，或在该密钥所属节点上
+	// 持有 key:write 的管理员。
+	//
+	// 责任人本人能吊销自己的密钥，是密钥泄露时唯一的自助止血路径：
+	// 轮换救不了场（共存窗口内旧凭据仍然有效，且 API 无法表达零窗口）。
+	// 代价是责任人手滑能断掉自己在跑的生产——那靠界面的二次确认拦，
+	// 而不是靠从他手里收走止血能力。
+	if u.ID != k.UserID {
+		allowed, err := a.resolver.Can(r.Context(), subjectOf(u), authz.PermKeyWrite, &k.OrgID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+			return
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "permission_denied", "没有吊销该密钥的权限")
+			return
+		}
 	}
 
 	if err := a.issuer.Revoke(r.Context(), id); err != nil {

@@ -441,3 +441,30 @@ func TestListAPIDefaultIsSingleNodeAndSubtreeIsOptIn(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &sub))
 	require.Len(t, sub, 2, "带 subtree=true 时子节点的密钥也要在")
 }
+
+func TestRevokeAPIOwnerCanRevokeOwnKey(t *testing.T) {
+	// 密钥泄露时唯一的自助止血路径：轮换救不了场（共存窗口内旧凭据
+	// 仍然有效，且 API 无法表达零窗口），去找管理员的延迟又恰恰是
+	// 泄露事件中最不该有的。所以责任人本人不需要任何授予就能吊销自己的密钥。
+	api, _, _, keys, _, uid := keyAPIFixture(t)
+	rec := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"测试","models":[]}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	// 不给任何授予，只带上「我就是责任人」的身份。
+	req := httptest.NewRequest(http.MethodDelete, "/api/keys/"+created.ID, nil)
+	req.SetPathValue("id", created.ID)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: uid, Status: UserStatusActive}))
+	rec2 := httptest.NewRecorder()
+	api.HandleRevoke(rec2, req)
+
+	require.Equal(t, http.StatusNoContent, rec2.Code)
+	stored, err := keys.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", stored.Status)
+}
