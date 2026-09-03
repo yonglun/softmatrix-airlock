@@ -39,7 +39,11 @@ type keyView struct {
 	RPMLimit       *int       `json:"rpm_limit"`
 	TPMLimit       *int       `json:"tpm_limit"`
 	ExpiresAt      *time.Time `json:"expires_at"`
-	CreatedAt      time.Time  `json:"created_at"`
+	// 轮换状态。共存窗口还剩多久，是轮换这个功能唯一需要被看见的信息；
+	// 没有这两个字段，界面只能说「轮换成功」，说不出旧凭据还能用多久。
+	RotatedAt        *time.Time `json:"rotated_at"`
+	PrevKeyExpiresAt *time.Time `json:"prev_key_expires_at"`
+	CreatedAt        time.Time  `json:"created_at"`
 }
 
 func viewOf(k *APIKey) keyView {
@@ -48,7 +52,9 @@ func viewOf(k *APIKey) keyView {
 		Name: k.Name, Status: k.Status, Models: orEmptyStrings(k.Models),
 		MaxBudget: k.MaxBudget, BudgetDuration: k.BudgetDuration,
 		RPMLimit: k.RPMLimit, TPMLimit: k.TPMLimit,
-		ExpiresAt: k.ExpiresAt, CreatedAt: k.CreatedAt,
+		ExpiresAt: k.ExpiresAt,
+		RotatedAt: k.RotatedAt, PrevKeyExpiresAt: k.PrevKeyExpiresAt,
+		CreatedAt: k.CreatedAt,
 	}
 }
 

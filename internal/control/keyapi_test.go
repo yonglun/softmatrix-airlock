@@ -368,3 +368,31 @@ func TestRevokeAllAPIWithConfirmRevokesEverything(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "revoked", k.Status)
 }
+
+func TestKeyViewCarriesRotationState(t *testing.T) {
+	// 轮换完界面要说得出「旧凭据还能用多久」——共存窗口的存在意义
+	// 就是给客户端替换凭据的时间，而这段时间还剩多少是唯一需要被看见的信息。
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	rec := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"测试","models":[]}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var created struct {
+		ID               string  `json:"id"`
+		RotatedAt        *string `json:"rotated_at"`
+		PrevKeyExpiresAt *string `json:"prev_key_expires_at"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.Nil(t, created.RotatedAt, "没轮换过的密钥这两个字段是空的")
+	require.Nil(t, created.PrevKeyExpiresAt)
+
+	rot := rotateReq(t, api, uid, created.ID, `{"window_seconds":3600}`)
+	require.Equal(t, http.StatusOK, rot.Code)
+
+	var rotated struct {
+		RotatedAt        *string `json:"rotated_at"`
+		PrevKeyExpiresAt *string `json:"prev_key_expires_at"`
+	}
+	require.NoError(t, json.Unmarshal(rot.Body.Bytes(), &rotated))
+	require.NotNil(t, rotated.RotatedAt, "轮换后必须能看到轮换时间")
+	require.NotNil(t, rotated.PrevKeyExpiresAt, "以及旧凭据的到期时间")
+}
