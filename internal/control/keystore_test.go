@@ -472,3 +472,68 @@ func TestMarkUpstreamBlockedStamps(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.UpstreamBlockedAt)
 }
+
+func TestListByOrgSubtreeCoversDescendants(t *testing.T) {
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "root", "/root")
+	seedOrg(t, db, "rd", "/root/rd")
+	seedOrg(t, db, "gw2", "/root/rd/gw2")
+	seedKey(t, db, "k-rd", "h-rd", "rd", uid, "active")
+	seedKey(t, db, "k-deep", "h-deep", "gw2", uid, "active")
+
+	got, err := keys.ListByOrgSubtree(ctx, "/root/rd")
+	require.NoError(t, err)
+	ids := []string{}
+	for _, k := range got {
+		ids = append(ids, k.ID)
+	}
+	require.ElementsMatch(t, []string{"k-rd", "k-deep"}, ids, "节点自身与后代都要在")
+}
+
+func TestListByOrgSubtreeSpareSiblingWithSamePrefix(t *testing.T) {
+	// 第五次遇到这个陷阱（P1.2b 权限判定、P1.3b 审批人查找、
+	// P1.3c 子树吊销、P1.4a 待审列表各踩过一次）：
+	// /root/rd 是 /root/rd2 的字符串前缀，但 rd2 并不在 rd 的子树里。
+	//
+	// 这条尤其要紧：这个查询是子树吊销的**预览**。多算一个兄弟节点，
+	// 管理员会以为吊销会打到那些密钥；少算则会漏报影响范围。
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "root", "/root")
+	seedOrg(t, db, "rd", "/root/rd")
+	seedOrg(t, db, "rd2", "/root/rd2")
+	seedKey(t, db, "k-rd", "h-rd", "rd", uid, "active")
+	seedKey(t, db, "k-rd2", "h-rd2", "rd2", uid, "active")
+
+	got, err := keys.ListByOrgSubtree(ctx, "/root/rd")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "k-rd", got[0].ID, "同前缀兄弟节点不能出现在预览里")
+}
+
+func TestListByOrgSubtreeIncludesAllStatuses(t *testing.T) {
+	// 浏览要看得见历史，因此不限状态——与 RevokeByOrgSubtree 的
+	// status IN ('active','pending') 不同。「将吊销 N 把」的 N
+	// 由调用方按状态自己数。
+	_, _, _, keys, db, uid := issuerFixture(t)
+	ctx := context.Background()
+	seedOrg(t, db, "rd", "/rd")
+	seedKey(t, db, "k-a", "h-a", "rd", uid, "active")
+	seedKey(t, db, "k-p", "h-p", "rd", uid, "pending")
+	seedKey(t, db, "k-r", "h-r", "rd", uid, "revoked")
+
+	got, err := keys.ListByOrgSubtree(ctx, "/rd")
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+}
+
+func TestListByOrgSubtreeEmptyReturnsEmptySlice(t *testing.T) {
+	_, _, _, keys, db, _ := issuerFixture(t)
+	seedOrg(t, db, "rd", "/rd")
+
+	got, err := keys.ListByOrgSubtree(context.Background(), "/rd")
+	require.NoError(t, err)
+	require.NotNil(t, got, "空结果要是空切片，否则 JSON 会序列化成 null")
+	require.Empty(t, got)
+}
