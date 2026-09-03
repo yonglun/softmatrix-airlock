@@ -1,11 +1,12 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, App, Button, Form, Input, Modal, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Form, Input, Modal, Space, Table, Tag } from 'antd'
+import { PlaintextKeyModal } from '@/components/PlaintextKeyModal'
 import { AppShell } from '@/components/AppShell'
 import { useSession } from '@/lib/session'
 import { apiGet, apiSend, ApiError } from '@/lib/api'
-import type { ApiRequest, ClaimedKey, Org } from '@/lib/types'
+import type { ApiRequest, IssuedKey, Org } from '@/lib/types'
 
 const STATUS_LABEL: Record<string, { text: string; color: string }> = {
   pending: { text: '待审批', color: 'gold' },
@@ -21,7 +22,7 @@ export default function MyRequestsPage() {
   const [rows, setRows] = useState<ApiRequest[]>([])
   const [orgs, setOrgs] = useState<Org[]>([])
   const [submitting, setSubmitting] = useState(false)
-  const [claimed, setClaimed] = useState<ClaimedKey | null>(null)
+  const [claimed, setClaimed] = useState<IssuedKey | null>(null)
   const [form] = Form.useForm<{ org_id: string; key_name: string; reason: string }>()
 
   const reload = useCallback(async () => {
@@ -61,7 +62,7 @@ export default function MyRequestsPage() {
 
   const claim = async (id: string) => {
     try {
-      const key = await apiSend<ClaimedKey>('POST', `/api/requests/${id}/claim`)
+      const key = await apiSend<IssuedKey>('POST', `/api/requests/${id}/claim`)
       setClaimed(key)
       await reload()
     } catch (e) {
@@ -145,23 +146,11 @@ export default function MyRequestsPage() {
         </Form>
       </Modal>
 
-      <Modal
+      <PlaintextKeyModal
+        plaintext={claimed?.key ?? null}
         title="密钥已签发"
-        open={claimed !== null}
-        onCancel={() => setClaimed(null)}
-        footer={<Button onClick={() => setClaimed(null)}>我已保存</Button>}
-      >
-        <Alert
-          type="warning"
-          showIcon
-          message="这串明文只显示这一次"
-          description="关闭后无法再次查看。请立刻保存到你的密钥管理器或 CI 变量里。"
-          style={{ marginBottom: 12 }}
-        />
-        <Typography.Paragraph copyable code>
-          {claimed?.key}
-        </Typography.Paragraph>
-      </Modal>
+        onClose={() => setClaimed(null)}
+      />
     </AppShell>
   )
 }

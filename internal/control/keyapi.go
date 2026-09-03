@@ -39,7 +39,11 @@ type keyView struct {
 	RPMLimit       *int       `json:"rpm_limit"`
 	TPMLimit       *int       `json:"tpm_limit"`
 	ExpiresAt      *time.Time `json:"expires_at"`
-	CreatedAt      time.Time  `json:"created_at"`
+	// 轮换状态。共存窗口还剩多久，是轮换这个功能唯一需要被看见的信息；
+	// 没有这两个字段，界面只能说「轮换成功」，说不出旧凭据还能用多久。
+	RotatedAt        *time.Time `json:"rotated_at"`
+	PrevKeyExpiresAt *time.Time `json:"prev_key_expires_at"`
+	CreatedAt        time.Time  `json:"created_at"`
 }
 
 func viewOf(k *APIKey) keyView {
@@ -48,7 +52,9 @@ func viewOf(k *APIKey) keyView {
 		Name: k.Name, Status: k.Status, Models: orEmptyStrings(k.Models),
 		MaxBudget: k.MaxBudget, BudgetDuration: k.BudgetDuration,
 		RPMLimit: k.RPMLimit, TPMLimit: k.TPMLimit,
-		ExpiresAt: k.ExpiresAt, CreatedAt: k.CreatedAt,
+		ExpiresAt: k.ExpiresAt,
+		RotatedAt: k.RotatedAt, PrevKeyExpiresAt: k.PrevKeyExpiresAt,
+		CreatedAt: k.CreatedAt,
 	}
 }
 
@@ -96,12 +102,55 @@ func (a *KeyAPI) HandleIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleList 列出某节点下的密钥。
+//
+// 带 ?subtree=true 时改为列出整个子树，供子树批量吊销的预览用——
+// 预览与开火用的是同一套节点选择子句（见 KeyStore.ListByOrgSubtree）。
+// 权限不必额外判定：中间件已按 key:read 校验过这个节点，而节点上的
+// 授予本就覆盖其子树。
 func (a *KeyAPI) HandleList(w http.ResponseWriter, r *http.Request) {
-	list, err := a.keys.ListByOrg(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+
+	var list []*APIKey
+	var err error
+	if r.URL.Query().Get("subtree") == "true" {
+		org, gerr := a.orgs.Get(r.Context(), id)
+		if gerr != nil {
+			writeKeyError(w, gerr, "查询密钥失败")
+			return
+		}
+		list, err = a.keys.ListByOrgSubtree(r.Context(), org.Path)
+	} else {
+		list, err = a.keys.ListByOrg(r.Context(), id)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "查询密钥失败")
 		return
 	}
+	out := make([]keyView, 0, len(list))
+	for _, k := range list {
+		out = append(out, viewOf(k))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// HandleMine 列出调用者作为责任人的全部密钥，跨节点。
+//
+// 按调用者本人过滤，因此不需要节点级判定——与 GET /api/requests
+// 同一先例。普通开发者既不知道自己的密钥挂在哪个节点，多半也没有
+// 那个节点上的 key:read，按节点查的接口对他没用。
+func (a *KeyAPI) HandleMine(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+
+	list, err := a.keys.ListByUser(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询密钥失败")
+		return
+	}
+
 	out := make([]keyView, 0, len(list))
 	for _, k := range list {
 		out = append(out, viewOf(k))
@@ -127,14 +176,23 @@ func (a *KeyAPI) HandleRevoke(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
 		return
 	}
-	allowed, err := a.resolver.Can(r.Context(), subjectOf(u), authz.PermKeyWrite, &k.OrgID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
-		return
-	}
-	if !allowed {
-		writeError(w, http.StatusForbidden, "permission_denied", "没有吊销该密钥的权限")
-		return
+	// 判定与 HandleRotate 对齐：责任人本人，或在该密钥所属节点上
+	// 持有 key:write 的管理员。
+	//
+	// 责任人本人能吊销自己的密钥，是密钥泄露时唯一的自助止血路径：
+	// 轮换救不了场（共存窗口内旧凭据仍然有效，且 API 无法表达零窗口）。
+	// 代价是责任人手滑能断掉自己在跑的生产——那靠界面的二次确认拦，
+	// 而不是靠从他手里收走止血能力。
+	if u.ID != k.UserID {
+		allowed, err := a.resolver.Can(r.Context(), subjectOf(u), authz.PermKeyWrite, &k.OrgID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+			return
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "permission_denied", "没有吊销该密钥的权限")
+			return
+		}
 	}
 
 	if err := a.issuer.Revoke(r.Context(), id); err != nil {

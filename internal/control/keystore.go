@@ -220,6 +220,40 @@ func (s *postgresKeyStore) RevokeByOrgSubtree(
 	return res.RowsAffected()
 }
 
+// ListByOrgSubtree 返回子树下的全部密钥，不限状态。
+//
+// 节点选择子句与 RevokeByOrgSubtree 逐字相同，这就是它存在的理由：
+// 子树批量吊销不可逆，预览的唯一价值是让人看见即将发生什么。
+// 两处匹配规则一旦分叉，预览比没有预览更危险。
+func (s *postgresKeyStore) ListByOrgSubtree(
+	ctx context.Context, orgPath string,
+) ([]*APIKey, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+keyColumns+` FROM api_keys
+		WHERE org_id IN (
+		    SELECT id FROM organizations
+		    WHERE path = $1 OR path LIKE $1 || '/%'
+		)
+		ORDER BY created_at DESC`, orgPath)
+	if err != nil {
+		return nil, fmt.Errorf("查询子树密钥失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return collectKeys(rows)
+}
+
+// ListByUser 返回该用户作为责任人的全部密钥，跨节点。
+func (s *postgresKeyStore) ListByUser(ctx context.Context, userID string) ([]*APIKey, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+keyColumns+` FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("查询本人密钥失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return collectKeys(rows)
+}
+
 // RevokeAll 是 break glass：吊销全系统密钥。不可逆。
 func (s *postgresKeyStore) RevokeAll(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx,

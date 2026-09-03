@@ -368,3 +368,134 @@ func TestRevokeAllAPIWithConfirmRevokesEverything(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "revoked", k.Status)
 }
+
+func TestKeyViewCarriesRotationState(t *testing.T) {
+	// 轮换完界面要说得出「旧凭据还能用多久」——共存窗口的存在意义
+	// 就是给客户端替换凭据的时间，而这段时间还剩多少是唯一需要被看见的信息。
+	api, _, _, _, _, uid := keyAPIFixture(t)
+	rec := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"测试","models":[]}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var created struct {
+		ID               string  `json:"id"`
+		RotatedAt        *string `json:"rotated_at"`
+		PrevKeyExpiresAt *string `json:"prev_key_expires_at"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.Nil(t, created.RotatedAt, "没轮换过的密钥这两个字段是空的")
+	require.Nil(t, created.PrevKeyExpiresAt)
+
+	rot := rotateReq(t, api, uid, created.ID, `{"window_seconds":3600}`)
+	require.Equal(t, http.StatusOK, rot.Code)
+
+	var rotated struct {
+		RotatedAt        *string `json:"rotated_at"`
+		PrevKeyExpiresAt *string `json:"prev_key_expires_at"`
+	}
+	require.NoError(t, json.Unmarshal(rot.Body.Bytes(), &rotated))
+	require.NotNil(t, rotated.RotatedAt, "轮换后必须能看到轮换时间")
+	require.NotNil(t, rotated.PrevKeyExpiresAt, "以及旧凭据的到期时间")
+}
+
+// listReq 发一次列表请求；subtree 为 true 时带上 ?subtree=true。
+func listReq(t *testing.T, api *KeyAPI, orgID string, subtree bool) *httptest.ResponseRecorder {
+	t.Helper()
+	url := "/api/orgs/" + orgID + "/keys"
+	if subtree {
+		url += "?subtree=true"
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req.SetPathValue("id", orgID)
+	rec := httptest.NewRecorder()
+	api.HandleList(rec, req)
+	return rec
+}
+
+func TestListAPIDefaultIsSingleNodeAndSubtreeIsOptIn(t *testing.T) {
+	// 不用 keyAPIFixture：它不返回 db，而子树匹配查的是真实
+	// organizations 表，必须能往里插子节点。
+	iss, orgs, _, keys, db, uid := issuerFixture(t)
+	rbac := newFakeRBACStore()
+	rbac.setPath("gw", "/gw")
+	api := NewKeyAPI(iss, keys, orgs, authz.NewResolver(rbac))
+
+	// issuerFixture 已经在真实库与 fakeOrgStore 里都建好了 gw（path=/gw）。
+	seedOrg(t, db, "sub", "/gw/sub")
+	seedKey(t, db, "k-gw", "h-gw", "gw", uid, "active")
+	seedKey(t, db, "k-sub", "h-sub", "sub", uid, "active")
+
+	rec := listReq(t, api, "gw", false)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var single []struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &single))
+	require.Len(t, single, 1, "缺省行为必须不变：只列本节点")
+	require.Equal(t, "k-gw", single[0].ID)
+
+	rec2 := listReq(t, api, "gw", true)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var sub []struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &sub))
+	require.Len(t, sub, 2, "带 subtree=true 时子节点的密钥也要在")
+}
+
+func TestRevokeAPIOwnerCanRevokeOwnKey(t *testing.T) {
+	// 密钥泄露时唯一的自助止血路径：轮换救不了场（共存窗口内旧凭据
+	// 仍然有效，且 API 无法表达零窗口），去找管理员的延迟又恰恰是
+	// 泄露事件中最不该有的。所以责任人本人不需要任何授予就能吊销自己的密钥。
+	api, _, _, keys, _, uid := keyAPIFixture(t)
+	rec := postKey(t, api, `{"org_id":"gw","user_id":"`+uid+`","name":"测试","models":[]}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	// 不给任何授予，只带上「我就是责任人」的身份。
+	req := httptest.NewRequest(http.MethodDelete, "/api/keys/"+created.ID, nil)
+	req.SetPathValue("id", created.ID)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: uid, Status: UserStatusActive}))
+	rec2 := httptest.NewRecorder()
+	api.HandleRevoke(rec2, req)
+
+	require.Equal(t, http.StatusNoContent, rec2.Code)
+	stored, err := keys.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", stored.Status)
+}
+
+func TestMineReturnsOnlyCallersKeysAcrossOrgs(t *testing.T) {
+	iss, orgs, _, keys, db, uid := issuerFixture(t)
+	rbac := newFakeRBACStore()
+	rbac.setPath("gw", "/gw")
+	api := NewKeyAPI(iss, keys, orgs, authz.NewResolver(rbac))
+
+	other := seedUserID(t, db, "mine-other")
+	seedOrg(t, db, "sub", "/gw/sub")
+	seedKey(t, db, "k-mine-gw", "h1", "gw", uid, "active")
+	seedKey(t, db, "k-mine-sub", "h2", "sub", uid, "active")
+	seedKey(t, db, "k-theirs", "h3", "gw", other, "active")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/keys/mine", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: uid, Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleMine(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ids := []string{}
+	for _, k := range got {
+		ids = append(ids, k.ID)
+	}
+	require.ElementsMatch(t, []string{"k-mine-gw", "k-mine-sub"}, ids,
+		"跨节点的本人密钥都要在，别人的一把都不能有")
+}

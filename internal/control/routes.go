@@ -311,6 +311,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "DELETE /api/keys/{id}", Access: AccessAuthenticated,
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevoke }),
 		},
+		{
+			// 只返回「我是责任人」的密钥，按调用者本人过滤，
+			// 因此不需要节点级判定——与 GET /api/requests 同一先例。
+			Pattern: "GET /api/keys/mine", Access: AccessAuthenticated,
+			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleMine }),
+		},
 
 		// ---- 申请与审批 ----
 		{

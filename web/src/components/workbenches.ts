@@ -15,13 +15,19 @@ export const WORKBENCHES: Workbench[] = [
     id: 'my-space',
     label: '我的空间',
     home: '/my/requests',
-    nav: [{ label: '我的申请', href: '/my/requests' }],
+    nav: [
+      { label: '我的申请', href: '/my/requests' },
+      { label: '我的密钥', href: '/my/keys' },
+    ],
   },
   {
     id: 'platform',
     label: '平台管理',
     home: '/platform/orgs',
-    nav: [{ label: '组织与成员', href: '/platform/orgs' }],
+    nav: [
+      { label: '组织与成员', href: '/platform/orgs' },
+      { label: '虚拟密钥', href: '/platform/keys' },
+    ],
   },
   {
     id: 'finops',
