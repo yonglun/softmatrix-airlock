@@ -3,6 +3,12 @@ node_modules/
 .env
 .env.*
 dist/
+# web/dist 的构建产物仍要忽略，但 .gitkeep 必须能提交——//go:embed all:dist
+# 要求该目录在编译期存在，空目录会让 go build ./... 直接失败。
+# 一旦父目录被上面的 dist/ 规则排除，子目录里 .gitignore 的反选规则就
+# 不会再生效，只能在这里把目录本身与这一个文件显式放行。
+!web/dist/
+!web/dist/.gitkeep
 build/
 bin/
 *.log

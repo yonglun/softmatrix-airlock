@@ -168,6 +168,16 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.KeyAPI)
 	}
+	consoleH := func() http.HandlerFunc {
+		if deps.ConsoleFS == nil {
+			// "/" 是通配兜底，捕获了此前完全没有路由匹配、原本会得到
+			// 普通 404 的一切路径。这里不能用 stub（501「未装配」）：
+			// 那是给「这条具体端点存在但没接线」用的，而未配置控制台时
+			// 语义是「这里本来就没有页面」，该是 404，不是 501。
+			return http.NotFound
+		}
+		return ConsoleHandler(deps.ConsoleFS)
+	}
 	reqH := func(pick func(*RequestAPI) http.HandlerFunc) http.HandlerFunc {
 		if deps.RequestAPI == nil {
 			return stub
@@ -314,6 +324,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleList }),
 		},
 		{
+			// 审批人视角的待审列表。可见范围在处理器内按 key:write 的
+			// Scopes 过滤，与 GET /api/orgs 同一先例。
+			Pattern: "GET /api/requests/to-approve", Access: AccessAuthenticated,
+			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleToApprove }),
+		},
+		{
 			// 以下三条路径里只有 request ID，中间件拿不到它归属的节点，
 			// 判定下沉到处理器自己做，与 DELETE /api/keys/{id} 同理。
 			Pattern: "POST /api/requests/{id}/approve", Access: AccessAuthenticated,
@@ -346,6 +362,20 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "POST /api/keys/revoke-all", Access: AccessPermission,
 			Permission: authz.PermKeyRevokeAll, Target: TargetGlobal(),
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevokeAll }),
+		},
+
+		// ---- 控制台静态站 ----
+		{
+			// 内层 mux 的兜底：拼错的 /api/xxx 与用错方法的请求都落到这里，
+			// 返回统一形状的 JSON 404 而不是 Go 默认的 text/plain。
+			Pattern: "/api/", Access: AccessAuthenticated,
+			Handler: APINotFoundHandler(),
+		},
+		{
+			// 必须是方法无关的 "/"：写成 "GET /" 会与 "/api/" 冲突，
+			// ServeMux 在注册时就 panic。
+			Pattern: "/", Access: AccessPublic,
+			Handler: consoleH(),
 		},
 	}
 }

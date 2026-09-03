@@ -1,6 +1,7 @@
 package control
 
 import (
+	"io/fs"
 	"net/http"
 	"strings"
 
@@ -15,6 +16,9 @@ type ServerDeps struct {
 	KeyAPI     *KeyAPI
 	RequestAPI *RequestAPI
 	Resolver   *authz.Resolver
+	// ConsoleFS 是嵌入的控制台静态站。为 nil 时该路由退化成未装配提示，
+	// 便于只测 API 的场景。
+	ConsoleFS fs.FS
 	// Routes 供测试注入自定义路由表；为空时用 DefaultRoutes。
 	Routes []Route
 }

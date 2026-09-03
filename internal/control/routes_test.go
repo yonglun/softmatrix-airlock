@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/stretchr/testify/require"
 
@@ -259,10 +260,51 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"POST /api/requests/{id}/approve",
 		"POST /api/requests/{id}/reject",
 		"POST /api/requests/{id}/claim",
+		"GET /api/requests/to-approve",
 		"POST /api/keys/{id}/rotate",
 		"POST /api/orgs/{id}/keys/revoke",
 		"POST /api/keys/revoke-all",
 	} {
 		require.True(t, patterns[want], "路由表缺少 %s", want)
 	}
+}
+
+func TestHandlerDoesNotPanicWithConsoleRoutes(t *testing.T) {
+	// SPA 兜底若被写成 "GET /"，会与既有的 "/api/" 冲突，ServeMux
+	// 在注册时直接 panic——服务根本起不来。这条当场抓住。
+	require.NotPanics(t, func() {
+		_ = NewServer(ServerDeps{
+			Auth: NewAuth(AuthDeps{
+				Users:    newFakeUserStore(),
+				Sessions: newFakeSessionStore(),
+			}),
+			ConsoleFS: fstest.MapFS{
+				"index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+			},
+		}).Handler()
+	})
+}
+
+func TestConsoleFallbackDoesNotShadowAPI(t *testing.T) {
+	h := NewServer(ServerDeps{
+		Auth: NewAuth(AuthDeps{
+			Users:    newFakeUserStore(),
+			Sessions: newFakeSessionStore(),
+		}),
+		ConsoleFS: fstest.MapFS{
+			"index.html": &fstest.MapFile{Data: []byte("<html>console</html>")},
+		},
+	}).Handler()
+
+	// 未登录打 API：应当是 401，而不是被静态兜底接走返回 HTML。
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/orgs", nil))
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.NotContains(t, rec.Body.String(), "console")
+
+	// 页面路径仍然回 index.html。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/platform/orgs", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "console")
 }

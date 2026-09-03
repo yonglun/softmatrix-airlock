@@ -310,3 +310,47 @@ func (s *postgresNotificationStore) MarkFailed(ctx context.Context, id, lastErr 
 	}
 	return nil
 }
+
+// ListAllPending 返回全部待审申请，最老的排前面。
+func (s *postgresRequestStore) ListAllPending(ctx context.Context) ([]*Request, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+requestColumns+` FROM requests
+		 WHERE status = 'pending' ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("查询待审申请失败: %w", err)
+	}
+	return scanRequests(rows)
+}
+
+// ListPendingForOrgPaths 返回 org 落在这些路径子树内的待审申请。
+//
+// 子树匹配必须加分隔符再比前缀：/root/rd 是 /root/rd2 的前缀，但 rd2
+// 并不在 rd 的子树里。少了这一笔，一个部门的申请会泄漏给隔壁部门的
+// 审批人。这个陷阱在 P1.2b 的权限判定、P1.3b 的审批人查找、P1.3c 的
+// 子树吊销里各踩过一次，这是第四次。
+//
+// paths 为空直接返回空列表：既省一次查询，也避免空列表被退化成
+// 「不加限制」这个最危险的方向。
+func (s *postgresRequestStore) ListPendingForOrgPaths(
+	ctx context.Context, paths []string,
+) ([]*Request, error) {
+	if len(paths) == 0 {
+		return []*Request{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+requestColumns+` FROM requests
+		WHERE status = 'pending'
+		  AND org_id IN (
+		      SELECT o.id FROM organizations o
+		      WHERE o.path = ANY($1)
+		         OR EXISTS (
+		             SELECT 1 FROM unnest($1::text[]) AS p(path)
+		             WHERE o.path LIKE p.path || '/%'
+		         )
+		  )
+		ORDER BY created_at`, paths)
+	if err != nil {
+		return nil, fmt.Errorf("按可见范围查询待审申请失败: %w", err)
+	}
+	return scanRequests(rows)
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/softmatrix/airlock/internal/litellm"
 	"github.com/softmatrix/airlock/internal/notify"
 	"github.com/softmatrix/airlock/migrations"
+	"github.com/softmatrix/airlock/web"
 )
 
 // RunControl 启动管理面进程。
@@ -151,6 +152,7 @@ func RunControl() error {
 			KeyAPI:     control.NewKeyAPI(issuer, keyStore, orgs, resolver),
 			RequestAPI: control.NewRequestAPI(approval, requests, approvalWorker),
 			Resolver:   resolver,
+			ConsoleFS:  web.Dist(),
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

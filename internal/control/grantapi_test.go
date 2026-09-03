@@ -300,3 +300,32 @@ func TestAssignPrimaryOrgUnknownUserReturns404(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+func TestWhoamiIncludesWorkbenches(t *testing.T) {
+	// grantFixture 已经预置了 root/rd/sales 三条路径。
+	api, users, rbac := grantFixture(t)
+	ctx := context.Background()
+
+	u, err := users.Upsert(ctx, &User{
+		ExternalID: "s1", Email: "a@x.com", Status: UserStatusActive,
+	})
+	require.NoError(t, err)
+	require.NoError(t, rbac.CreateGrant(ctx, RoleGrant{
+		ID: "g1", UserID: u.ID, RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	}))
+
+	rec := httptest.NewRecorder()
+	api.HandleWhoami(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/whoami", nil), u))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got struct {
+		Workbenches       []string `json:"workbenches"`
+		GlobalPermissions []string `json:"global_permissions"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+
+	require.Contains(t, got.Workbenches, "platform",
+		"只在某节点持 org_admin 的用户也要能看到平台管理")
+	require.Empty(t, got.GlobalPermissions,
+		"同一个用户的全局权限集是空的——这正是不能用它判定工作台的原因")
+}

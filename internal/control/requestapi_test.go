@@ -215,3 +215,47 @@ func TestClaimAPIBeforeApprovalIs409(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec.Code)
 	require.Contains(t, rec.Body.String(), "request_not_approved")
 }
+
+func TestToApproveAPIEmptyIsArrayNotNull(t *testing.T) {
+	// 申请人没有 key:write，列表为空——但必须是 []，前端才不用处理 null。
+	api, _, requesterID, _, _ := requestAPIFixture(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/requests/to-approve", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: requesterID, Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleToApprove(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, "[]", rec.Body.String())
+}
+
+func TestToApproveAPIReturnsPendingForApprover(t *testing.T) {
+	api, svc, requesterID, approverID, _ := requestAPIFixture(t)
+	submitNewKey(t, svc, requesterID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/requests/to-approve", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: approverID, Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleToApprove(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+}
+
+func TestToApproveAPIUnknownUserIs404(t *testing.T) {
+	// 上下文里的用户在库里不存在时，映射成 404 而不是 500。
+	api, _, _, _, _ := requestAPIFixture(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/requests/to-approve", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: "nobody", Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleToApprove(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "user_not_found")
+}

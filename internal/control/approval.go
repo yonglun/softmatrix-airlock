@@ -226,3 +226,37 @@ func (s *ApprovalService) Claim(
 	}
 	return plaintext, k, nil
 }
+
+// ListToApprove 返回该用户有权审批的待审申请。
+//
+// 可见范围沿用 GET /api/orgs 的先例：用 Scopes 拿到「在哪些节点上持有
+// key:write」，再按这些节点的子树过滤；持全局授予的人看全部。
+//
+// 放在服务层而不是 RequestAPI：判定要用 Resolver 与 Orgs，这两样这里
+// 已经有（requireKeyWrite 就在用），放这儿可以完全避开构造函数签名变更。
+func (s *ApprovalService) ListToApprove(ctx context.Context, userID string) ([]*Request, error) {
+	u, err := s.deps.Users.ByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	global, nodes, err := s.deps.Resolver.Scopes(ctx, subjectOf(u), authz.PermKeyWrite)
+	if err != nil {
+		return nil, fmt.Errorf("计算可见范围失败: %w", err)
+	}
+	if global {
+		return s.deps.Requests.ListAllPending(ctx)
+	}
+
+	paths := make([]string, 0, len(nodes))
+	for _, id := range nodes {
+		org, oerr := s.deps.Orgs.Get(ctx, id)
+		if oerr != nil {
+			// 授予指向一个查不到的节点，不该让整个列表失败。
+			slog.Warn("解析可见节点失败，跳过", "org_id", id, "err", oerr)
+			continue
+		}
+		paths = append(paths, org.Path)
+	}
+	return s.deps.Requests.ListPendingForOrgPaths(ctx, paths)
+}

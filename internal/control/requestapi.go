@@ -141,6 +141,8 @@ func writeRequestError(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, ErrOrgNotFound):
 		writeError(w, http.StatusNotFound, "org_not_found", "组织节点不存在")
+	case errors.Is(err, ErrUserNotFound):
+		writeError(w, http.StatusNotFound, "user_not_found", "用户不存在")
 	case errors.Is(err, ErrAPIKeyNotFound):
 		writeError(w, http.StatusNotFound, "key_not_found", "目标密钥不存在")
 	case errors.Is(err, ErrRequestNotFound):
@@ -204,4 +206,26 @@ func (a *RequestAPI) HandleClaim(w http.ResponseWriter, r *http.Request) {
 		keyView
 		Key string `json:"key"`
 	}{keyView: viewOf(k), Key: plaintext})
+}
+
+// HandleToApprove 列出调用者有权审批的待审申请。
+//
+// 声明为 AccessAuthenticated、过滤在处理器内做——与 GET /api/orgs、
+// GET /api/requests 同一类：可见范围本身是结果的一部分，不是准入条件。
+func (a *RequestAPI) HandleToApprove(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+	list, err := a.svc.ListToApprove(r.Context(), u.ID)
+	if err != nil {
+		writeRequestError(w, err, "查询待审申请失败")
+		return
+	}
+	out := make([]requestView, 0, len(list))
+	for _, req := range list {
+		out = append(out, requestViewOf(req))
+	}
+	writeJSON(w, http.StatusOK, out)
 }

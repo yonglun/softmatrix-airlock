@@ -345,3 +345,55 @@ func TestConcurrentClaimsYieldExactlyOneKey(t *testing.T) {
 		requesterID).Scan(&active))
 	require.Equal(t, 1, active, "输掉的那一路必须已把自己签发的密钥吊销")
 }
+
+func TestListToApproveScopedApproverSeesOwnSubtree(t *testing.T) {
+	svc, _, _, requesterID, approverID, _ := approvalFixture(t)
+	ctx := context.Background()
+	submitNewKey(t, svc, requesterID)
+
+	got, err := svc.ListToApprove(ctx, approverID)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "审批人在 gw 上持 org_admin，看得到 gw 的申请")
+	require.Equal(t, "gw", got[0].OrgID)
+}
+
+func TestListToApproveRequesterSeesNothing(t *testing.T) {
+	// 申请人自己没有 key:write。待审列表对他应当是空的——
+	// 既不该报错，也不该看到自己那张单子。
+	svc, _, _, requesterID, _, _ := approvalFixture(t)
+	ctx := context.Background()
+	submitNewKey(t, svc, requesterID)
+
+	got, err := svc.ListToApprove(ctx, requesterID)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func TestListToApproveGlobalApproverSeesAll(t *testing.T) {
+	// 持全局授予的人看全部，不受节点范围限制。
+	// approvalFixture 的第二个返回值就是那个 *sql.DB，用它种一个新用户。
+	svc, db, _, requesterID, _, _ := approvalFixture(t)
+	ctx := context.Background()
+	submitNewKey(t, svc, requesterID)
+
+	adminID := seedUserID(t, db, "global-admin")
+	rbac := svc.deps.RBAC.(*fakeRBACStore)
+	require.NoError(t, rbac.CreateGrant(ctx, RoleGrant{
+		ID: "g-global", UserID: adminID, RoleID: authz.RolePlatformAdmin,
+	}))
+
+	got, err := svc.ListToApprove(ctx, adminID)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+}
+
+func TestListToApproveExcludesDecided(t *testing.T) {
+	svc, _, _, requesterID, approverID, _ := approvalFixture(t)
+	ctx := context.Background()
+	r := submitNewKey(t, svc, requesterID)
+	require.NoError(t, svc.Approve(ctx, r.ID, approverID))
+
+	got, err := svc.ListToApprove(ctx, approverID)
+	require.NoError(t, err)
+	require.Empty(t, got, "批准过的不该留在待审列表里")
+}

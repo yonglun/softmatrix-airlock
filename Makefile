@@ -1,13 +1,22 @@
-.PHONY: test build lint up down migrate
+.PHONY: test build lint up down migrate console console-install
 
 test:
 	go test ./... -race -count=1
+	@test -d web/node_modules || { echo "前端依赖未安装：请先执行 make console-install"; exit 1; }
+	cd web && npm test
 
-build:
+console-install:
+	cd web && npm ci
+
+console:
+	cd web && npm run build
+
+build: console
 	go build -o bin/airlock ./cmd/airlock
 
 lint:
 	go vet ./...
+	cd web && npm run typecheck
 	@echo "检查管理面与数据面的包边界..."
 	@! go list -deps ./internal/control/... 2>/dev/null | grep -q 'airlock/internal/edge' \
 		|| { echo "违规：internal/control 依赖了 internal/edge"; exit 1; }
