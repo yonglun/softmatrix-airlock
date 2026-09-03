@@ -468,3 +468,34 @@ func TestRevokeAPIOwnerCanRevokeOwnKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "revoked", stored.Status)
 }
+
+func TestMineReturnsOnlyCallersKeysAcrossOrgs(t *testing.T) {
+	iss, orgs, _, keys, db, uid := issuerFixture(t)
+	rbac := newFakeRBACStore()
+	rbac.setPath("gw", "/gw")
+	api := NewKeyAPI(iss, keys, orgs, authz.NewResolver(rbac))
+
+	other := seedUserID(t, db, "mine-other")
+	seedOrg(t, db, "sub", "/gw/sub")
+	seedKey(t, db, "k-mine-gw", "h1", "gw", uid, "active")
+	seedKey(t, db, "k-mine-sub", "h2", "sub", uid, "active")
+	seedKey(t, db, "k-theirs", "h3", "gw", other, "active")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/keys/mine", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userCtxKey,
+		&User{ID: uid, Status: UserStatusActive}))
+	rec := httptest.NewRecorder()
+	api.HandleMine(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ids := []string{}
+	for _, k := range got {
+		ids = append(ids, k.ID)
+	}
+	require.ElementsMatch(t, []string{"k-mine-gw", "k-mine-sub"}, ids,
+		"跨节点的本人密钥都要在，别人的一把都不能有")
+}

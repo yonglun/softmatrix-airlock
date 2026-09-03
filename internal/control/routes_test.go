@@ -255,6 +255,7 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"POST /api/keys",
 		"GET /api/orgs/{id}/keys",
 		"DELETE /api/keys/{id}",
+		"GET /api/keys/mine",
 		"POST /api/requests",
 		"GET /api/requests",
 		"POST /api/requests/{id}/approve",

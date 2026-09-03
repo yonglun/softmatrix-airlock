@@ -133,6 +133,31 @@ func (a *KeyAPI) HandleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// HandleMine 列出调用者作为责任人的全部密钥，跨节点。
+//
+// 按调用者本人过滤，因此不需要节点级判定——与 GET /api/requests
+// 同一先例。普通开发者既不知道自己的密钥挂在哪个节点，多半也没有
+// 那个节点上的 key:read，按节点查的接口对他没用。
+func (a *KeyAPI) HandleMine(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+
+	list, err := a.keys.ListByUser(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询密钥失败")
+		return
+	}
+
+	out := make([]keyView, 0, len(list))
+	for _, k := range list {
+		out = append(out, viewOf(k))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // HandleRevoke 吊销一把密钥。
 //
 // 权限判定下沉到这里：路径里只有密钥 ID，中间件拿不到它所属的节点，
