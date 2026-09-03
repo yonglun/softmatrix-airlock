@@ -7,6 +7,7 @@ import { OrgTree } from '@/components/OrgTree'
 import { PlaintextKeyModal } from '@/components/PlaintextKeyModal'
 import { KeyRotateModal } from '@/components/KeyRotateModal'
 import { SubtreeRevokeModal } from '@/components/SubtreeRevokeModal'
+import { DangerZone } from '@/components/DangerZone'
 import { useSession } from '@/lib/session'
 import { apiGet, apiSend, ApiError } from '@/lib/api'
 import { KEY_STATUS, rotationCell } from '@/lib/keyDisplay'
@@ -161,6 +162,11 @@ export default function PlatformKeysPage() {
               ]}
             />
           </Space>
+
+          <DangerZone
+            canRevokeAll={session.global_permissions.includes('key:revoke_all')}
+            onDone={reload}
+          />
         </div>
       </div>
 
