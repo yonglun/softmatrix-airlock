@@ -6,6 +6,7 @@ import { AppShell } from '@/components/AppShell'
 import { OrgTree } from '@/components/OrgTree'
 import { PlaintextKeyModal } from '@/components/PlaintextKeyModal'
 import { KeyRotateModal } from '@/components/KeyRotateModal'
+import { SubtreeRevokeModal } from '@/components/SubtreeRevokeModal'
 import { useSession } from '@/lib/session'
 import { apiGet, apiSend, ApiError } from '@/lib/api'
 import { KEY_STATUS, rotationCell } from '@/lib/keyDisplay'
@@ -21,6 +22,7 @@ export default function PlatformKeysPage() {
   const [issuing, setIssuing] = useState(false)
   const [plaintext, setPlaintext] = useState<string | null>(null)
   const [rotating, setRotating] = useState<ApiKey | null>(null)
+  const [revokingSubtree, setRevokingSubtree] = useState(false)
   const [form] = Form.useForm<{ user_id: string; name: string; models: string }>()
 
   useEffect(() => {
@@ -101,6 +103,15 @@ export default function PlatformKeysPage() {
               <span>
                 包含子树 <Switch checked={subtree} onChange={setSubtree} disabled={!selected} />
               </span>
+              <Popconfirm
+                title="先看一眼影响范围"
+                description="下一步会列出这个子树下的全部密钥。"
+                onConfirm={() => setRevokingSubtree(true)}
+              >
+                <Button danger disabled={!selected}>
+                  吊销该子树的全部密钥
+                </Button>
+              </Popconfirm>
             </Space>
 
             <Table<ApiKey>
@@ -178,6 +189,12 @@ export default function PlatformKeysPage() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <SubtreeRevokeModal
+        org={revokingSubtree ? (orgs.find((o) => o.ID === selected) ?? null) : null}
+        onClose={() => setRevokingSubtree(false)}
+        onDone={reload}
+      />
 
       <KeyRotateModal
         target={rotating}
