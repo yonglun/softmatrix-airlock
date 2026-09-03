@@ -73,3 +73,29 @@ export type ClaimedKey = {
   created_at: string
   key: string
 }
+
+/** GET /api/orgs/{id}/keys、GET /api/keys/mine —— snake_case（keyView 有 json tag） */
+export type ApiKey = {
+  id: string
+  key_prefix: string
+  org_id: string
+  user_id: string
+  name: string
+  status: string
+  models: string[]
+  max_budget: number | null
+  budget_duration: string | null
+  rpm_limit: number | null
+  tpm_limit: number | null
+  expires_at: string | null
+  /** 轮换状态：共存窗口内旧凭据仍可用，到 prev_key_expires_at 为止 */
+  rotated_at: string | null
+  prev_key_expires_at: string | null
+  created_at: string
+}
+
+/** 签发、轮换、领取的响应：keyView 加一个只出现这一次的明文 */
+export type IssuedKey = ApiKey & { key: string }
+
+/** 两个批量吊销端点的响应 */
+export type RevokeResult = { revoked: number }
