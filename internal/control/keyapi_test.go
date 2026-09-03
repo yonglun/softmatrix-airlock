@@ -396,3 +396,48 @@ func TestKeyViewCarriesRotationState(t *testing.T) {
 	require.NotNil(t, rotated.RotatedAt, "轮换后必须能看到轮换时间")
 	require.NotNil(t, rotated.PrevKeyExpiresAt, "以及旧凭据的到期时间")
 }
+
+// listReq 发一次列表请求；subtree 为 true 时带上 ?subtree=true。
+func listReq(t *testing.T, api *KeyAPI, orgID string, subtree bool) *httptest.ResponseRecorder {
+	t.Helper()
+	url := "/api/orgs/" + orgID + "/keys"
+	if subtree {
+		url += "?subtree=true"
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req.SetPathValue("id", orgID)
+	rec := httptest.NewRecorder()
+	api.HandleList(rec, req)
+	return rec
+}
+
+func TestListAPIDefaultIsSingleNodeAndSubtreeIsOptIn(t *testing.T) {
+	// 不用 keyAPIFixture：它不返回 db，而子树匹配查的是真实
+	// organizations 表，必须能往里插子节点。
+	iss, orgs, _, keys, db, uid := issuerFixture(t)
+	rbac := newFakeRBACStore()
+	rbac.setPath("gw", "/gw")
+	api := NewKeyAPI(iss, keys, orgs, authz.NewResolver(rbac))
+
+	// issuerFixture 已经在真实库与 fakeOrgStore 里都建好了 gw（path=/gw）。
+	seedOrg(t, db, "sub", "/gw/sub")
+	seedKey(t, db, "k-gw", "h-gw", "gw", uid, "active")
+	seedKey(t, db, "k-sub", "h-sub", "sub", uid, "active")
+
+	rec := listReq(t, api, "gw", false)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var single []struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &single))
+	require.Len(t, single, 1, "缺省行为必须不变：只列本节点")
+	require.Equal(t, "k-gw", single[0].ID)
+
+	rec2 := listReq(t, api, "gw", true)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var sub []struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &sub))
+	require.Len(t, sub, 2, "带 subtree=true 时子节点的密钥也要在")
+}

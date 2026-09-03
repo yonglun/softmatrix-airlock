@@ -102,8 +102,26 @@ func (a *KeyAPI) HandleIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleList 列出某节点下的密钥。
+//
+// 带 ?subtree=true 时改为列出整个子树，供子树批量吊销的预览用——
+// 预览与开火用的是同一套节点选择子句（见 KeyStore.ListByOrgSubtree）。
+// 权限不必额外判定：中间件已按 key:read 校验过这个节点，而节点上的
+// 授予本就覆盖其子树。
 func (a *KeyAPI) HandleList(w http.ResponseWriter, r *http.Request) {
-	list, err := a.keys.ListByOrg(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+
+	var list []*APIKey
+	var err error
+	if r.URL.Query().Get("subtree") == "true" {
+		org, gerr := a.orgs.Get(r.Context(), id)
+		if gerr != nil {
+			writeKeyError(w, gerr, "查询密钥失败")
+			return
+		}
+		list, err = a.keys.ListByOrgSubtree(r.Context(), org.Path)
+	} else {
+		list, err = a.keys.ListByOrg(r.Context(), id)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "查询密钥失败")
 		return
