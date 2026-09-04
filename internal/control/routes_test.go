@@ -250,6 +250,7 @@ func TestDefaultRoutesCoverAllOrgEndpoints(t *testing.T) {
 		"GET /api/orgs/{id}/effective-grants",
 		"POST /api/grants",
 		"DELETE /api/grants/{id}",
+		"GET /api/users",
 		"PUT /api/users/{id}/primary-org",
 		"GET /api/litellm/sync/status",
 		"POST /api/litellm/sync",

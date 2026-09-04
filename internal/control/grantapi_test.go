@@ -428,3 +428,34 @@ func TestListRolesGrantableAtForPlatformAdminKeepsEverything(t *testing.T) {
 		api, &User{ID: "root", Status: UserStatusActive}, "?grantable_at=rd"))
 	require.Contains(t, grantable, authz.RolePlatformAdmin)
 }
+
+func TestListUsersNeedsGrantReadSomewhere(t *testing.T) {
+	// 门槛是「在任意位置持有 grant:read」而不是全局 grant:read：
+	// grant:read 是 ScopeOrg 权限，组织管理员是在节点上持有它的，
+	// 用全局视角判定会把这两个页面的主要用户全部挡在门外。
+	api, users, rbac := grantFixture(t)
+	addUser(t, users, "someone", "someone@x.com")
+
+	nobody := &User{ID: "nobody", Status: UserStatusActive}
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/users", nil), nobody)
+	rec := httptest.NewRecorder()
+	api.HandleListUsers(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code, "一条授予都没有的人看不到通讯录")
+
+	// 只在 rd 这一个节点上持 org_admin（含 grant:read）就够了。
+	_ = rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-rd-admin", UserID: "boss", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	})
+	req2 := asUser(httptest.NewRequest(http.MethodGet, "/api/users", nil),
+		&User{ID: "boss", Status: UserStatusActive})
+	rec2 := httptest.NewRecorder()
+	api.HandleListUsers(rec2, req2)
+
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var got []struct {
+		ID    string `json:"ID"`
+		Email string `json:"Email"`
+	}
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &got))
+	require.NotEmpty(t, got, "节点级的 grant:read 就足以拿到用户列表")
+}

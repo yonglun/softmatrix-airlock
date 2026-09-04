@@ -64,6 +64,43 @@ func (a *GrantAPI) HandleListRoles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, roles)
 }
 
+// HandleListUsers 列出活跃用户。
+//
+// 两个页面都要它：角色与权限页拿它把 user_id 还原成人名、并在授予时选人；
+// 组织与成员页拿它按 primary_org_id 过滤出该节点的成员。
+//
+// 门槛是「在任意位置持有 grant:read」而不是全局 grant:read——后者会把只在
+// 某个子树上持 org_admin 的人挡在外面，而他们正是这两个页面的主要用户。
+// 用 Scopes 判定，与 P1.4a 的工作台可见性同一手法。
+//
+// 不按调用者的可见子树裁剪是有意识的选择：要把某人授权到自己的子树上，
+// 那个人此刻多半还不在你的子树里，甚至没有归属节点。企业内部控制台向
+// 「有权管理授权的人」展示员工名录是正常的。
+func (a *GrantAPI) HandleListUsers(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+	allowed, err := holdsAnywhere(r.Context(), a.resolver, subjectOf(u),
+		[]string{authz.PermGrantRead})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "permission_denied", "没有查看用户列表的权限")
+		return
+	}
+
+	list, err := a.users.ListActive(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询用户失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
 // HandleListGrants 列出某个组织节点上的授予。
 func (a *GrantAPI) HandleListGrants(w http.ResponseWriter, r *http.Request) {
 	grants, err := a.rbac.ListGrantsForOrg(r.Context(), r.PathValue("id"))
