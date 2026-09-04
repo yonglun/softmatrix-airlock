@@ -205,6 +205,55 @@ func (s *postgresRBACStore) ListGlobalGrants(ctx context.Context) ([]RoleGrant, 
 	return scanGrants(rows)
 }
 
+// ListEffectiveGrantsForOrg 返回对该节点有效的全部授予。
+//
+// 祖先链直接从物化路径切出来，与 authz.Resolver.ancestorChain 同一手法：
+// 切成 ID 段后逐个精确比较，全程不做字符串前缀匹配。这样在结构上就不可能
+// 把 /root/rd2 误当成 /root/rd 的祖先——权限页多列一个人，管理员就会以为
+// 那个人有权，而他其实管的是隔壁部门。
+func (s *postgresRBACStore) ListEffectiveGrantsForOrg(
+	ctx context.Context, orgID string,
+) ([]EffectiveGrant, error) {
+	var path string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT path FROM organizations WHERE id = $1`, orgID).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrOrgNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询节点路径失败: %w", err)
+	}
+
+	chain := strings.Split(strings.Trim(path, "/"), "/")
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+grantColumns+` FROM role_grants
+		 WHERE org_id = ANY($1) OR org_id IS NULL
+		 ORDER BY created_at`, chain)
+	if err != nil {
+		return nil, fmt.Errorf("查询有效授予失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	grants, err := scanGrants(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]EffectiveGrant, 0, len(grants))
+	for _, g := range grants {
+		switch {
+		case g.OrgID == nil:
+			out = append(out, EffectiveGrant{RoleGrant: g, Source: GrantSourceGlobal})
+		case *g.OrgID == orgID:
+			out = append(out, EffectiveGrant{RoleGrant: g, Source: GrantSourceDirect})
+		default:
+			out = append(out, EffectiveGrant{RoleGrant: g, Source: GrantSourceInherited})
+		}
+	}
+	return out, nil
+}
+
 // CountGlobalGrantsOfRole 只数全局授予。
 // CheckBootstrapConfig 用它判断「系统里有没有管理员」——
 // 节点级的平台管理员授予不算，因为它拿不到全局能力。

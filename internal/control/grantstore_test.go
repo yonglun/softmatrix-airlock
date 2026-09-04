@@ -201,3 +201,98 @@ func TestCountGlobalGrantsOfRole(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, n, "只数全局授予")
 }
+
+func seedGrantOrg(t *testing.T, db *sql.DB, id, path string) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO organizations (id, name, path) VALUES ($1,$1,$2)`, id, path)
+	require.NoError(t, err)
+}
+
+func seedGrantRow(t *testing.T, db *sql.DB, id, userID, roleID string, orgID *string) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO role_grants (id, user_id, role_id, org_id) VALUES ($1,$2,$3,$4)`,
+		id, userID, roleID, orgID)
+	require.NoError(t, err)
+}
+
+func TestListEffectiveGrantsCoversThreeSources(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresRBACStore(db)
+	require.NoError(t, s.SyncBuiltinRoles(context.Background()))
+	ctx := context.Background()
+
+	uid := seedUserID(t, db, "eff-user")
+	seedGrantOrg(t, db, "root", "/root")
+	seedGrantOrg(t, db, "rd", "/root/rd")
+
+	root := "root"
+	rd := "rd"
+	seedGrantRow(t, db, "g-direct", uid, "org_admin", &rd)
+	seedGrantRow(t, db, "g-inherited", uid, "auditor", &root)
+	seedGrantRow(t, db, "g-global", uid, "platform_admin", nil)
+
+	got, err := s.ListEffectiveGrantsForOrg(ctx, "rd")
+	require.NoError(t, err)
+
+	bySource := map[string]string{}
+	for _, g := range got {
+		bySource[g.Source] = g.ID
+	}
+	require.Equal(t, "g-direct", bySource[GrantSourceDirect])
+	require.Equal(t, "g-inherited", bySource[GrantSourceInherited], "祖先节点的授予要算进来")
+	require.Equal(t, "g-global", bySource[GrantSourceGlobal], "全局授予对任何节点都算数")
+	require.Len(t, got, 3)
+}
+
+func TestListEffectiveGrantsSpareSiblingWithSamePrefix(t *testing.T) {
+	// 第六次遇到这个陷阱（P1.2b 权限判定、P1.3b 审批人查找、P1.3c 子树吊销、
+	// P1.4a 待审列表、P1.4b 子树密钥查询各踩过一次）：
+	// /root/rd 是 /root/rd2 的字符串前缀，但 rd2 既不是 rd 的祖先也不是后代。
+	//
+	// 这条尤其要紧：权限页多列一个人，管理员会以为那个人有权；
+	// 而他其实管的是隔壁部门。
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresRBACStore(db)
+	require.NoError(t, s.SyncBuiltinRoles(context.Background()))
+	ctx := context.Background()
+
+	uid := seedUserID(t, db, "eff-sibling-user")
+	seedGrantOrg(t, db, "root", "/root")
+	seedGrantOrg(t, db, "rd", "/root/rd")
+	seedGrantOrg(t, db, "rd2", "/root/rd2")
+
+	rd := "rd"
+	rd2 := "rd2"
+	seedGrantRow(t, db, "g-rd", uid, "org_admin", &rd)
+	seedGrantRow(t, db, "g-rd2", uid, "org_admin", &rd2)
+
+	got, err := s.ListEffectiveGrantsForOrg(ctx, "rd")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "g-rd", got[0].ID, "同前缀兄弟节点的授予不能混进来")
+}
+
+func TestListEffectiveGrantsUnknownOrgIsNotFound(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresRBACStore(db)
+
+	_, err := s.ListEffectiveGrantsForOrg(context.Background(), "nope")
+	require.ErrorIs(t, err, ErrOrgNotFound)
+}
+
+func TestListEffectiveGrantsEmptyReturnsEmptySlice(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresRBACStore(db)
+	seedGrantOrg(t, db, "lonely", "/lonely")
+
+	got, err := s.ListEffectiveGrantsForOrg(context.Background(), "lonely")
+	require.NoError(t, err)
+	require.NotNil(t, got, "空结果要是空切片，否则 JSON 会序列化成 null")
+	require.Empty(t, got)
+}
