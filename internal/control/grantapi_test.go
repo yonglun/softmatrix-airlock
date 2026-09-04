@@ -378,3 +378,53 @@ func TestEffectiveGrantsUnknownOrgIs404(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), "org_not_found")
 }
+
+func rolesReq(t *testing.T, api *GrantAPI, u *User, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/roles"+query, nil), u)
+	rec := httptest.NewRecorder()
+	api.HandleListRoles(rec, req)
+	return rec
+}
+
+func roleIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var roles []struct {
+		ID string `json:"ID"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &roles))
+	out := []string{}
+	for _, r := range roles {
+		out = append(out, r.ID)
+	}
+	return out
+}
+
+func TestListRolesGrantableAtFiltersByAntiEscalation(t *testing.T) {
+	// 只在 rd 上持 org_admin 的人，不能把 platform_admin 授给别人——
+	// 那会让他间接拿到自己没有的全局权限。下拉里就不该出现这个选项。
+	api, _, rbac := grantFixture(t)
+	_ = rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-orgadmin", UserID: "boss", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	})
+	boss := &User{ID: "boss", Status: UserStatusActive}
+
+	all := roleIDs(t, rolesReq(t, api, boss, ""))
+	require.Contains(t, all, authz.RolePlatformAdmin, "不带参数时行为不变：返回全部角色")
+
+	grantable := roleIDs(t, rolesReq(t, api, boss, "?grantable_at=rd"))
+	require.NotContains(t, grantable, authz.RolePlatformAdmin,
+		"授不了的角色不能出现在下拉里")
+	require.Contains(t, grantable, authz.RoleOrgAdmin, "自己持有的角色可以往下授")
+}
+
+func TestListRolesGrantableAtForPlatformAdminKeepsEverything(t *testing.T) {
+	api, _, rbac := grantFixture(t)
+	_ = rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-platform", UserID: "root", RoleID: authz.RolePlatformAdmin,
+	})
+
+	grantable := roleIDs(t, rolesReq(t,
+		api, &User{ID: "root", Status: UserStatusActive}, "?grantable_at=rd"))
+	require.Contains(t, grantable, authz.RolePlatformAdmin)
+}

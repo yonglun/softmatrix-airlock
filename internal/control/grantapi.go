@@ -23,14 +23,44 @@ func NewGrantAPI(users UserStore, rbac RBACStore, resolver *authz.Resolver) *Gra
 	return &GrantAPI{users: users, rbac: rbac, resolver: resolver}
 }
 
-// HandleListRoles 列出全部角色。任何已登录用户都能看——
+// HandleListRoles 列出角色。任何已登录用户都能看——
 // 知道系统里有哪些角色不构成信息泄漏，而授予界面需要它。
+//
+// 带 ?grantable_at=<orgID> 时只返回调用者在该节点**确实能授予**的角色。
+// 这个判定必须留在服务端：GET /api/roles 不返回权限集，前端算不出
+// 「角色的权限是否为我已持有权限的子集」，让它算等于把授权判定复制一份
+// 到前端（P1.4a D2 否决过同一条路）。
 func (a *GrantAPI) HandleListRoles(w http.ResponseWriter, r *http.Request) {
 	roles, err := a.rbac.ListRoles(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "查询角色失败")
 		return
 	}
+
+	if at := r.URL.Query().Get("grantable_at"); at != "" {
+		u, ok := UserFromContext(r.Context())
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+			return
+		}
+		filtered := make([]Role, 0, len(roles))
+		for _, role := range roles {
+			ok, err := a.resolver.CanGrant(r.Context(), subjectOf(u), role.ID, &at)
+			if err != nil {
+				if errors.Is(err, authz.ErrOrgNotFound) {
+					writeError(w, http.StatusNotFound, "org_not_found", "组织节点不存在")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+				return
+			}
+			if ok {
+				filtered = append(filtered, role)
+			}
+		}
+		roles = filtered
+	}
+
 	writeJSON(w, http.StatusOK, roles)
 }
 
