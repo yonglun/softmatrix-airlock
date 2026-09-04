@@ -266,6 +266,14 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleListGrants }),
 		},
 		{
+			// 「谁对这个节点有权」——直授 + 继承 + 全局。与上面那条只答
+			// 直授的路由是两个问题，返回形状也不同，因此单开一条路由
+			// 而不是给它加查询参数。
+			Pattern: "GET /api/orgs/{id}/effective-grants", Access: AccessPermission,
+			Permission: authz.PermGrantRead, Target: TargetFromPath("id"),
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleEffectiveGrants }),
+		},
+		{
 			Pattern: "POST /api/grants", Access: AccessPermission,
 			Permission: authz.PermGrantWrite, Target: TargetFromBody("org_id"),
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleCreateGrant }),
@@ -275,6 +283,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 中间件拿不到目标节点。判定下沉到 HandleDeleteGrant 自己做。
 			Pattern: "DELETE /api/grants/{id}", Access: AccessAuthenticated,
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleDeleteGrant }),
+		},
+		{
+			// 判定下沉到处理器：门槛是「在任意位置持有 grant:read」，
+			// 而 grant:read 是 ScopeOrg 权限，中间件的全局目标表达不了这个。
+			Pattern: "GET /api/users", Access: AccessAuthenticated,
+			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleListUsers }),
 		},
 		{
 			Pattern: "PUT /api/users/{id}/primary-org", Access: AccessPermission,

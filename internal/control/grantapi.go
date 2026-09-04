@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -22,15 +23,82 @@ func NewGrantAPI(users UserStore, rbac RBACStore, resolver *authz.Resolver) *Gra
 	return &GrantAPI{users: users, rbac: rbac, resolver: resolver}
 }
 
-// HandleListRoles 列出全部角色。任何已登录用户都能看——
+// HandleListRoles 列出角色。任何已登录用户都能看——
 // 知道系统里有哪些角色不构成信息泄漏，而授予界面需要它。
+//
+// 带 ?grantable_at=<orgID> 时只返回调用者在该节点**确实能授予**的角色。
+// 这个判定必须留在服务端：GET /api/roles 不返回权限集，前端算不出
+// 「角色的权限是否为我已持有权限的子集」，让它算等于把授权判定复制一份
+// 到前端（P1.4a D2 否决过同一条路）。
 func (a *GrantAPI) HandleListRoles(w http.ResponseWriter, r *http.Request) {
 	roles, err := a.rbac.ListRoles(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "查询角色失败")
 		return
 	}
+
+	if at := r.URL.Query().Get("grantable_at"); at != "" {
+		u, ok := UserFromContext(r.Context())
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+			return
+		}
+		filtered := make([]Role, 0, len(roles))
+		for _, role := range roles {
+			ok, err := a.resolver.CanGrant(r.Context(), subjectOf(u), role.ID, &at)
+			if err != nil {
+				if errors.Is(err, authz.ErrOrgNotFound) {
+					writeError(w, http.StatusNotFound, "org_not_found", "组织节点不存在")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+				return
+			}
+			if ok {
+				filtered = append(filtered, role)
+			}
+		}
+		roles = filtered
+	}
+
 	writeJSON(w, http.StatusOK, roles)
+}
+
+// HandleListUsers 列出活跃用户。
+//
+// 两个页面都要它：角色与权限页拿它把 user_id 还原成人名、并在授予时选人；
+// 组织与成员页拿它按 primary_org_id 过滤出该节点的成员。
+//
+// 门槛是「在任意位置持有 grant:read」而不是全局 grant:read——后者会把只在
+// 某个子树上持 org_admin 的人挡在外面，而他们正是这两个页面的主要用户。
+// 用 Scopes 判定，与 P1.4a 的工作台可见性同一手法。
+//
+// 不按调用者的可见子树裁剪是有意识的选择：要把某人授权到自己的子树上，
+// 那个人此刻多半还不在你的子树里，甚至没有归属节点。企业内部控制台向
+// 「有权管理授权的人」展示员工名录是正常的。
+func (a *GrantAPI) HandleListUsers(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
+		return
+	}
+	allowed, err := holdsAnywhere(r.Context(), a.resolver, subjectOf(u),
+		[]string{authz.PermGrantRead})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "权限判定失败")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "permission_denied", "没有查看用户列表的权限")
+		return
+	}
+
+	list, err := a.users.ListActive(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询用户失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 // HandleListGrants 列出某个组织节点上的授予。
@@ -41,6 +109,46 @@ func (a *GrantAPI) HandleListGrants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, grants)
+}
+
+// effectiveGrantView 是有效权限视图的一行。
+//
+// source_org_id 就是授予实际挂在哪个节点：direct 时等于被查询的节点，
+// inherited 时是某个祖先，global 时为空。
+type effectiveGrantView struct {
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	RoleID      string    `json:"role_id"`
+	Source      string    `json:"source"`
+	SourceOrgID *string   `json:"source_org_id"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// HandleEffectiveGrants 回答「谁对这个节点有权」。
+//
+// 与 HandleListGrants 的区别是这一条把三类授予合起来：本节点直授、
+// 继承自祖先节点、全局。只答直授的页面会系统性地少告诉管理员一批人，
+// 而那批人恰恰权限最大——祖先上的 org_admin 与全局 platform_admin
+// 对这个节点都有完全权限。
+func (a *GrantAPI) HandleEffectiveGrants(w http.ResponseWriter, r *http.Request) {
+	list, err := a.rbac.ListEffectiveGrantsForOrg(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			writeError(w, http.StatusNotFound, "org_not_found", "组织节点不存在")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询有效授予失败")
+		return
+	}
+
+	out := make([]effectiveGrantView, 0, len(list))
+	for _, g := range list {
+		out = append(out, effectiveGrantView{
+			ID: g.ID, UserID: g.UserID, RoleID: g.RoleID,
+			Source: g.Source, SourceOrgID: g.OrgID, CreatedAt: g.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // HandleCreateGrant 授予角色。

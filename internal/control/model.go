@@ -143,6 +143,23 @@ type RoleGrant struct {
 	CreatedAt time.Time
 }
 
+// 有效授予的来源。
+const (
+	GrantSourceDirect    = "direct"    // 直接挂在这个节点上
+	GrantSourceInherited = "inherited" // 挂在祖先节点上，对本节点同样生效
+	GrantSourceGlobal    = "global"    // 全局授予，对任何节点都生效
+)
+
+// EffectiveGrant 是「谁对某个节点有权」的一行。
+//
+// 与 RoleGrant 的区别在于它回答的是**有效**权限：除了本节点直授，
+// 还含祖先节点的授予与全局授予。RoleGrant.OrgID 本身就是来源节点，
+// 因此不需要额外的 SourceOrgID 字段。
+type EffectiveGrant struct {
+	RoleGrant
+	Source string
+}
+
 // Role 是一个角色。权限集不在这里——它由 authz 包的注册表定义。
 type Role struct {
 	ID          string
@@ -169,6 +186,10 @@ type RBACStore interface {
 	// ListGlobalGrants 列出全部全局授予（org_id 为 NULL）。
 	// 审批人查找需要它——全局授予对任何节点都算数。
 	ListGlobalGrants(ctx context.Context) ([]RoleGrant, error)
+	// ListEffectiveGrantsForOrg 返回对该节点有效的全部授予：
+	// 本节点直授 + 祖先节点授予 + 全局授予，每条标注 Source。
+	// 节点不存在时返回 ErrOrgNotFound。
+	ListEffectiveGrantsForOrg(ctx context.Context, orgID string) ([]EffectiveGrant, error)
 }
 
 // APIKey 是控制面视角的一把虚拟密钥。UpstreamKeyEnc 是加密后的上游密钥。

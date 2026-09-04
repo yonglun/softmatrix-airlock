@@ -27,6 +27,7 @@ export const WORKBENCHES: Workbench[] = [
     nav: [
       { label: '组织与成员', href: '/platform/orgs' },
       { label: '虚拟密钥', href: '/platform/keys' },
+      { label: '角色与权限', href: '/platform/grants' },
     ],
   },
   {

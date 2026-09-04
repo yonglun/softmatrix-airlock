@@ -329,3 +329,133 @@ func TestWhoamiIncludesWorkbenches(t *testing.T) {
 	require.Empty(t, got.GlobalPermissions,
 		"同一个用户的全局权限集是空的——这正是不能用它判定工作台的原因")
 }
+
+func TestEffectiveGrantsViewCarriesSource(t *testing.T) {
+	api, _, rbac := grantFixture(t)
+	root := "root"
+	rd := "rd"
+	rbac.setEffective("rd", []EffectiveGrant{
+		{RoleGrant: RoleGrant{ID: "g1", UserID: "u1", RoleID: "org_admin", OrgID: &rd},
+			Source: GrantSourceDirect},
+		{RoleGrant: RoleGrant{ID: "g2", UserID: "u2", RoleID: "auditor", OrgID: &root},
+			Source: GrantSourceInherited},
+		{RoleGrant: RoleGrant{ID: "g3", UserID: "u3", RoleID: "platform_admin", OrgID: nil},
+			Source: GrantSourceGlobal},
+	})
+
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/orgs/rd/effective-grants", nil),
+		&User{ID: "admin", Status: UserStatusActive})
+	req.SetPathValue("id", "rd")
+	rec := httptest.NewRecorder()
+	api.HandleEffectiveGrants(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []struct {
+		ID          string  `json:"id"`
+		Source      string  `json:"source"`
+		SourceOrgID *string `json:"source_org_id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 3)
+	require.Equal(t, "direct", got[0].Source)
+	require.Equal(t, "rd", *got[0].SourceOrgID)
+	require.Equal(t, "inherited", got[1].Source)
+	require.Equal(t, "root", *got[1].SourceOrgID, "继承行要指出授予实际挂在哪个节点")
+	require.Equal(t, "global", got[2].Source)
+	require.Nil(t, got[2].SourceOrgID, "全局授予没有来源节点")
+}
+
+func TestEffectiveGrantsUnknownOrgIs404(t *testing.T) {
+	api, _, rbac := grantFixture(t)
+	rbac.effectiveErr = ErrOrgNotFound
+
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/orgs/nope/effective-grants", nil),
+		&User{ID: "admin", Status: UserStatusActive})
+	req.SetPathValue("id", "nope")
+	rec := httptest.NewRecorder()
+	api.HandleEffectiveGrants(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "org_not_found")
+}
+
+func rolesReq(t *testing.T, api *GrantAPI, u *User, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/roles"+query, nil), u)
+	rec := httptest.NewRecorder()
+	api.HandleListRoles(rec, req)
+	return rec
+}
+
+func roleIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var roles []struct {
+		ID string `json:"ID"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &roles))
+	out := []string{}
+	for _, r := range roles {
+		out = append(out, r.ID)
+	}
+	return out
+}
+
+func TestListRolesGrantableAtFiltersByAntiEscalation(t *testing.T) {
+	// 只在 rd 上持 org_admin 的人，不能把 platform_admin 授给别人——
+	// 那会让他间接拿到自己没有的全局权限。下拉里就不该出现这个选项。
+	api, _, rbac := grantFixture(t)
+	_ = rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-orgadmin", UserID: "boss", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	})
+	boss := &User{ID: "boss", Status: UserStatusActive}
+
+	all := roleIDs(t, rolesReq(t, api, boss, ""))
+	require.Contains(t, all, authz.RolePlatformAdmin, "不带参数时行为不变：返回全部角色")
+
+	grantable := roleIDs(t, rolesReq(t, api, boss, "?grantable_at=rd"))
+	require.NotContains(t, grantable, authz.RolePlatformAdmin,
+		"授不了的角色不能出现在下拉里")
+	require.Contains(t, grantable, authz.RoleOrgAdmin, "自己持有的角色可以往下授")
+}
+
+func TestListRolesGrantableAtForPlatformAdminKeepsEverything(t *testing.T) {
+	api, _, rbac := grantFixture(t)
+	_ = rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-platform", UserID: "root", RoleID: authz.RolePlatformAdmin,
+	})
+
+	grantable := roleIDs(t, rolesReq(t,
+		api, &User{ID: "root", Status: UserStatusActive}, "?grantable_at=rd"))
+	require.Contains(t, grantable, authz.RolePlatformAdmin)
+}
+
+func TestListUsersNeedsGrantReadSomewhere(t *testing.T) {
+	// 门槛是「在任意位置持有 grant:read」而不是全局 grant:read：
+	// grant:read 是 ScopeOrg 权限，组织管理员是在节点上持有它的，
+	// 用全局视角判定会把这两个页面的主要用户全部挡在门外。
+	api, users, rbac := grantFixture(t)
+	addUser(t, users, "someone", "someone@x.com")
+
+	nobody := &User{ID: "nobody", Status: UserStatusActive}
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/users", nil), nobody)
+	rec := httptest.NewRecorder()
+	api.HandleListUsers(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code, "一条授予都没有的人看不到通讯录")
+
+	// 只在 rd 这一个节点上持 org_admin（含 grant:read）就够了。
+	_ = rbac.CreateGrant(context.Background(), RoleGrant{
+		ID: "g-rd-admin", UserID: "boss", RoleID: authz.RoleOrgAdmin, OrgID: strp("rd"),
+	})
+	req2 := asUser(httptest.NewRequest(http.MethodGet, "/api/users", nil),
+		&User{ID: "boss", Status: UserStatusActive})
+	rec2 := httptest.NewRecorder()
+	api.HandleListUsers(rec2, req2)
+
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var got []struct {
+		ID    string `json:"ID"`
+		Email string `json:"Email"`
+	}
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &got))
+	require.NotEmpty(t, got, "节点级的 grant:read 就足以拿到用户列表")
+}

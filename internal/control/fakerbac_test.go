@@ -10,9 +10,11 @@ import (
 
 // fakeRBACStore 是内存版 RBAC 存储，供不需要数据库的测试使用。
 type fakeRBACStore struct {
-	mu     sync.Mutex
-	grants map[string]RoleGrant // grantID -> grant
-	paths  map[string]string    // orgID -> 物化路径
+	mu           sync.Mutex
+	grants       map[string]RoleGrant // grantID -> grant
+	paths        map[string]string    // orgID -> 物化路径
+	effective    map[string][]EffectiveGrant
+	effectiveErr error
 }
 
 func newFakeRBACStore() *fakeRBACStore {
@@ -92,6 +94,28 @@ func (f *fakeRBACStore) ListGlobalGrants(_ context.Context) ([]RoleGrant, error)
 		}
 	}
 	return out, nil
+}
+
+// effective 由测试预置。分类逻辑活在真实 store 里（见 grantstore_test.go），
+// fake 不重做一遍——重做的 fake 迟早会和真实实现说不同的话。
+func (f *fakeRBACStore) ListEffectiveGrantsForOrg(
+	_ context.Context, orgID string,
+) ([]EffectiveGrant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.effectiveErr != nil {
+		return nil, f.effectiveErr
+	}
+	return append([]EffectiveGrant{}, f.effective[orgID]...), nil
+}
+
+func (f *fakeRBACStore) setEffective(orgID string, list []EffectiveGrant) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.effective == nil {
+		f.effective = map[string][]EffectiveGrant{}
+	}
+	f.effective[orgID] = list
 }
 
 func (f *fakeRBACStore) CountGlobalGrantsOfRole(_ context.Context, roleID string) (int, error) {
