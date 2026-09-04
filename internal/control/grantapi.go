@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -41,6 +42,46 @@ func (a *GrantAPI) HandleListGrants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, grants)
+}
+
+// effectiveGrantView 是有效权限视图的一行。
+//
+// source_org_id 就是授予实际挂在哪个节点：direct 时等于被查询的节点，
+// inherited 时是某个祖先，global 时为空。
+type effectiveGrantView struct {
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	RoleID      string    `json:"role_id"`
+	Source      string    `json:"source"`
+	SourceOrgID *string   `json:"source_org_id"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// HandleEffectiveGrants 回答「谁对这个节点有权」。
+//
+// 与 HandleListGrants 的区别是这一条把三类授予合起来：本节点直授、
+// 继承自祖先节点、全局。只答直授的页面会系统性地少告诉管理员一批人，
+// 而那批人恰恰权限最大——祖先上的 org_admin 与全局 platform_admin
+// 对这个节点都有完全权限。
+func (a *GrantAPI) HandleEffectiveGrants(w http.ResponseWriter, r *http.Request) {
+	list, err := a.rbac.ListEffectiveGrantsForOrg(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			writeError(w, http.StatusNotFound, "org_not_found", "组织节点不存在")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "查询有效授予失败")
+		return
+	}
+
+	out := make([]effectiveGrantView, 0, len(list))
+	for _, g := range list {
+		out = append(out, effectiveGrantView{
+			ID: g.ID, UserID: g.UserID, RoleID: g.RoleID,
+			Source: g.Source, SourceOrgID: g.OrgID, CreatedAt: g.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // HandleCreateGrant 授予角色。

@@ -329,3 +329,52 @@ func TestWhoamiIncludesWorkbenches(t *testing.T) {
 	require.Empty(t, got.GlobalPermissions,
 		"同一个用户的全局权限集是空的——这正是不能用它判定工作台的原因")
 }
+
+func TestEffectiveGrantsViewCarriesSource(t *testing.T) {
+	api, _, rbac := grantFixture(t)
+	root := "root"
+	rd := "rd"
+	rbac.setEffective("rd", []EffectiveGrant{
+		{RoleGrant: RoleGrant{ID: "g1", UserID: "u1", RoleID: "org_admin", OrgID: &rd},
+			Source: GrantSourceDirect},
+		{RoleGrant: RoleGrant{ID: "g2", UserID: "u2", RoleID: "auditor", OrgID: &root},
+			Source: GrantSourceInherited},
+		{RoleGrant: RoleGrant{ID: "g3", UserID: "u3", RoleID: "platform_admin", OrgID: nil},
+			Source: GrantSourceGlobal},
+	})
+
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/orgs/rd/effective-grants", nil),
+		&User{ID: "admin", Status: UserStatusActive})
+	req.SetPathValue("id", "rd")
+	rec := httptest.NewRecorder()
+	api.HandleEffectiveGrants(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []struct {
+		ID          string  `json:"id"`
+		Source      string  `json:"source"`
+		SourceOrgID *string `json:"source_org_id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 3)
+	require.Equal(t, "direct", got[0].Source)
+	require.Equal(t, "rd", *got[0].SourceOrgID)
+	require.Equal(t, "inherited", got[1].Source)
+	require.Equal(t, "root", *got[1].SourceOrgID, "继承行要指出授予实际挂在哪个节点")
+	require.Equal(t, "global", got[2].Source)
+	require.Nil(t, got[2].SourceOrgID, "全局授予没有来源节点")
+}
+
+func TestEffectiveGrantsUnknownOrgIs404(t *testing.T) {
+	api, _, rbac := grantFixture(t)
+	rbac.effectiveErr = ErrOrgNotFound
+
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/orgs/nope/effective-grants", nil),
+		&User{ID: "admin", Status: UserStatusActive})
+	req.SetPathValue("id", "nope")
+	rec := httptest.NewRecorder()
+	api.HandleEffectiveGrants(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "org_not_found")
+}
