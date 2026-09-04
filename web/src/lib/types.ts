@@ -86,3 +86,23 @@ export type IssuedKey = ApiKey & { key: string }
 
 /** 两个批量吊销端点的响应 */
 export type RevokeResult = { revoked: number }
+
+/** GET /api/roles —— PascalCase（Role 没有 json tag） */
+export type Role = {
+  ID: string
+  Name: string
+  Description: string
+  IsBuiltin: boolean
+}
+
+/** GET /api/orgs/{id}/effective-grants —— snake_case（视图类型有 json tag） */
+export type EffectiveGrant = {
+  id: string
+  user_id: string
+  role_id: string
+  /** direct = 本节点直授；inherited = 继承自祖先；global = 全局授予 */
+  source: 'direct' | 'inherited' | 'global'
+  /** 授予实际挂在哪个节点；global 时为 null */
+  source_org_id: string | null
+  created_at: string
+}
