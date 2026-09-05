@@ -216,7 +216,12 @@ func (a *UsageAPI) HandleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CSV 分支在 Task 8 接上——本任务先让 JSON 路径独立跑通。
+	if q.Get("format") == "csv" {
+		writeCSV(w, "usage-summary.csv",
+			[]string{"维度", "请求数", "输入 token", "输出 token", "成本(元)"},
+			summaryCSVRows(rows))
+		return
+	}
 	writeJSON(w, http.StatusOK, summaryViews(rows))
 }
 
@@ -304,7 +309,13 @@ func (a *UsageAPI) HandleAuditRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CSV 分支在 Task 8 接上——本任务先让 JSON 路径独立跑通。
+	if q.Get("format") == "csv" {
+		writeCSV(w, "audit-records.csv",
+			[]string{"时间", "请求 ID", "组织", "成员", "密钥", "模型",
+				"状态码", "耗时(ms)", "首字(ms)", "输入 token", "输出 token", "成本(元)", "错误类型"},
+			auditCSVRows(rows))
+		return
+	}
 	writeJSON(w, http.StatusOK, auditViews(rows))
 }
 
