@@ -59,6 +59,7 @@ var builtinRoles = []Role{
 		Name:        "组织管理员",
 		Description: "管理被授予节点及其子树：组织结构、成员归属、角色授予",
 		Permissions: []string{
+			PermCostRead,
 			PermGrantRead, PermGrantWrite, PermKeyRead, PermKeyRequest, PermKeyWrite,
 			PermMemberAssign, PermOrgDelete, PermOrgImport, PermOrgRead, PermOrgWrite,
 		},

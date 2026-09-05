@@ -43,7 +43,7 @@ func TestOrgPermissionsAreMarkedOrg(t *testing.T) {
 
 func TestAllIsSortedAndComplete(t *testing.T) {
 	all := All()
-	require.Len(t, all, 14, "权限总数与设计文档 §4 的清单一致（P1.3c 新增 key:revoke_all）")
+	require.Len(t, all, 15, "权限总数与设计文档 §4 的清单一致（P1.5a 新增 cost:read）")
 
 	for i := 1; i < len(all); i++ {
 		require.Less(t, all[i-1].Key, all[i].Key,
