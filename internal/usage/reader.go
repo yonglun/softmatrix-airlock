@@ -128,3 +128,89 @@ func (r *Reader) Summary(ctx context.Context, q SummaryQuery) ([]SummaryRow, err
 
 // Cost 把 Micro 还原成 pricing.Micro，供调用方按统一口径处理金额。
 func (row SummaryRow) Cost() pricing.Micro { return pricing.Micro(row.CostMicro) }
+
+// AuditQuery 是明细查询的条件。各过滤字段为零值表示不过滤。
+type AuditQuery struct {
+	From, To             time.Time
+	OrgID, UserID, Model string
+	OnlyErrors           bool
+	Limit, Offset        int
+}
+
+// AuditRow 是一条调用流水。
+type AuditRow struct {
+	Timestamp    time.Time
+	RequestID    string
+	OrgID        string
+	UserID       string
+	KeyID        string
+	Model        string
+	StatusCode   int
+	LatencyMS    int
+	TTFTMS       int
+	InputTokens  int64
+	OutputTokens int64
+	CostMicro    int64
+	ErrorType    string
+}
+
+// maxAuditLimit 是单页上限。翻页是给人看的，不是导数据的通道——
+// 要全量请走 CSV 导出。
+const maxAuditLimit = 200
+
+func (r *Reader) Records(ctx context.Context, q AuditQuery) ([]AuditRow, error) {
+	limit := q.Limit
+	if limit <= 0 || limit > maxAuditLimit {
+		limit = maxAuditLimit
+	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	sql := `SELECT ts, request_id, org_id, user_id, key_id, model,
+		    status_code, latency_ms, ttft_ms,
+		    input_tokens, output_tokens, cost_micro, error_type
+		FROM airlock.usage_records
+		WHERE ts >= ? AND ts < ?`
+	args := []any{q.From, q.To}
+	if q.OrgID != "" {
+		sql += ` AND org_id = ?`
+		args = append(args, q.OrgID)
+	}
+	if q.UserID != "" {
+		sql += ` AND user_id = ?`
+		args = append(args, q.UserID)
+	}
+	if q.Model != "" {
+		sql += ` AND model = ?`
+		args = append(args, q.Model)
+	}
+	if q.OnlyErrors {
+		sql += ` AND status_code >= 400`
+	}
+	sql += fmt.Sprintf(` ORDER BY ts DESC LIMIT %d OFFSET %d`, limit, offset)
+
+	rows, err := r.conn.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询调用流水失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := []AuditRow{}
+	for rows.Next() {
+		var row AuditRow
+		var status uint16
+		var latency, ttft uint32
+		if err := rows.Scan(&row.Timestamp, &row.RequestID, &row.OrgID, &row.UserID,
+			&row.KeyID, &row.Model, &status, &latency, &ttft,
+			&row.InputTokens, &row.OutputTokens, &row.CostMicro, &row.ErrorType); err != nil {
+			return nil, fmt.Errorf("扫描流水行失败: %w", err)
+		}
+		row.StatusCode = int(status)
+		row.LatencyMS = int(latency)
+		row.TTFTMS = int(ttft)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

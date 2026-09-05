@@ -93,3 +93,65 @@ func TestSummaryRejectsUnknownDimension(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrUnknownGroupBy)
 }
+
+func TestRecordsFiltersAndPages(t *testing.T) {
+	conn := testCH(t)
+	cleanUsage(t, conn)
+	r := &Reader{conn: conn}
+	ctx := context.Background()
+
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	seedUsage(t, conn, usageAt(base, "rd", "alice", "qwen-plus", 100))
+	seedUsage(t, conn, usageAt(base.Add(time.Minute), "rd", "bob", "qwen-max", 200))
+	seedUsage(t, conn, usageAt(base.Add(2*time.Minute), "sales", "alice", "qwen-plus", 300))
+
+	from, to := base.Add(-time.Hour), base.Add(time.Hour)
+
+	all, err := r.Records(ctx, AuditQuery{From: from, To: to, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, all, 3)
+	require.True(t, all[0].Timestamp.After(all[1].Timestamp), "默认按时间倒序，最新的在前")
+
+	byOrg, err := r.Records(ctx, AuditQuery{From: from, To: to, OrgID: "rd", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, byOrg, 2)
+
+	byUser, err := r.Records(ctx, AuditQuery{From: from, To: to, UserID: "alice", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, byUser, 2)
+
+	byModel, err := r.Records(ctx, AuditQuery{From: from, To: to, Model: "qwen-max", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, byModel, 1)
+
+	page1, err := r.Records(ctx, AuditQuery{From: from, To: to, Limit: 2})
+	require.NoError(t, err)
+	require.Len(t, page1, 2)
+	page2, err := r.Records(ctx, AuditQuery{From: from, To: to, Limit: 2, Offset: 2})
+	require.NoError(t, err)
+	require.Len(t, page2, 1)
+	require.NotEqual(t, page1[0].RequestID, page2[0].RequestID, "翻页不能重复给同一条")
+}
+
+func TestRecordsOnlyErrors(t *testing.T) {
+	conn := testCH(t)
+	cleanUsage(t, conn)
+	r := &Reader{conn: conn}
+	ctx := context.Background()
+
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	ok := usageAt(base, "rd", "alice", "qwen-plus", 100)
+	bad := usageAt(base.Add(time.Minute), "rd", "bob", "qwen-plus", 0)
+	bad.StatusCode = 429
+	bad.ErrorType = "rate_limited"
+	seedUsage(t, conn, ok)
+	seedUsage(t, conn, bad)
+
+	rows, err := r.Records(ctx, AuditQuery{
+		From: base.Add(-time.Hour), To: base.Add(time.Hour), OnlyErrors: true, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, 429, rows[0].StatusCode)
+	require.Equal(t, "rate_limited", rows[0].ErrorType)
+}
