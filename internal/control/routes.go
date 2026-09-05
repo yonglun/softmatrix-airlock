@@ -168,6 +168,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.KeyAPI)
 	}
+	usageH := func(pick func(*UsageAPI) http.HandlerFunc) http.HandlerFunc {
+		if deps.UsageAPI == nil {
+			return stub
+		}
+		return pick(deps.UsageAPI)
+	}
 	consoleH := func() http.HandlerFunc {
 		if deps.ConsoleFS == nil {
 			// "/" 是通配兜底，捕获了此前完全没有路由匹配、原本会得到
@@ -382,6 +388,21 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "POST /api/keys/revoke-all", Access: AccessPermission,
 			Permission: authz.PermKeyRevokeAll, Target: TargetGlobal(),
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevokeAll }),
+		},
+
+		// ---- 用量分析与审计 ----
+		{
+			// 可见范围（全局 cost:read_all 还是按 cost:read 的节点收窄）
+			// 由处理器判定：中间件的单一目标表达不了「不限范围」与
+			// 「限定这些子树」这两种结果。
+			Pattern: "GET /api/usage/summary", Access: AccessAuthenticated,
+			Handler: usageH(func(u *UsageAPI) http.HandlerFunc { return u.HandleSummary }),
+		},
+		{
+			// 审计维持全局口径，中间件判完即可。
+			Pattern: "GET /api/audit/records", Access: AccessPermission,
+			Permission: authz.PermAuditRead, Target: TargetGlobal(),
+			Handler: usageH(func(u *UsageAPI) http.HandlerFunc { return u.HandleAuditRecords }),
 		},
 
 		// ---- 控制台静态站 ----
