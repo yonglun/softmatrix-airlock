@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/softmatrix/airlock/internal/authz"
@@ -263,6 +264,88 @@ func summaryViews(rows []usage.SummaryRow) []summaryView {
 			Key: r.Key, Requests: r.Requests,
 			InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
 			CostMicro: r.CostMicro,
+		})
+	}
+	return out
+}
+
+// HandleAuditRecords 按条件检索调用流水。
+//
+// 权限由中间件按全局 audit:read 判完（审计是合规职能，维持全局口径），
+// 因此这里不再做可见范围收窄——与 HandleSummary 刻意不同。
+func (a *UsageAPI) HandleAuditRecords(w http.ResponseWriter, r *http.Request) {
+	if a.reader == nil {
+		writeError(w, http.StatusServiceUnavailable, "analytics_disabled",
+			"用量分析未启用：未配置 CLICKHOUSE_DSN")
+		return
+	}
+
+	q := r.URL.Query()
+	from, to, err := parseRange(q)
+	if writeRangeError(w, err) {
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "解析时间范围失败")
+		return
+	}
+
+	rows, err := a.reader.Records(r.Context(), usage.AuditQuery{
+		From: from, To: to,
+		OrgID:      q.Get("org_id"),
+		UserID:     q.Get("user_id"),
+		Model:      q.Get("model"),
+		OnlyErrors: q.Get("only_errors") == "true",
+		Limit:      atoiOr(q.Get("limit"), 50),
+		Offset:     atoiOr(q.Get("offset"), 0),
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "analytics_unreachable", "查询调用流水失败")
+		return
+	}
+
+	// CSV 分支在 Task 8 接上——本任务先让 JSON 路径独立跑通。
+	writeJSON(w, http.StatusOK, auditViews(rows))
+}
+
+// atoiOr 解析十进制整数，失败或为空时返回缺省值。
+// 翻页参数写错不该让整个请求 400——退回缺省页更有用。
+func atoiOr(raw string, fallback int) int {
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+type auditView struct {
+	Timestamp    time.Time `json:"ts"`
+	RequestID    string    `json:"request_id"`
+	OrgID        string    `json:"org_id"`
+	UserID       string    `json:"user_id"`
+	KeyID        string    `json:"key_id"`
+	Model        string    `json:"model"`
+	StatusCode   int       `json:"status_code"`
+	LatencyMS    int       `json:"latency_ms"`
+	TTFTMS       int       `json:"ttft_ms"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	CostMicro    int64     `json:"cost_micro"`
+	ErrorType    string    `json:"error_type"`
+}
+
+func auditViews(rows []usage.AuditRow) []auditView {
+	out := make([]auditView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, auditView{
+			Timestamp: r.Timestamp, RequestID: r.RequestID, OrgID: r.OrgID,
+			UserID: r.UserID, KeyID: r.KeyID, Model: r.Model,
+			StatusCode: r.StatusCode, LatencyMS: r.LatencyMS, TTFTMS: r.TTFTMS,
+			InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
+			CostMicro: r.CostMicro, ErrorType: r.ErrorType,
 		})
 	}
 	return out

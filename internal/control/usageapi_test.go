@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -175,6 +176,61 @@ func TestSummaryWithoutReaderIs503(t *testing.T) {
 	}))
 
 	rec := summaryReq(t, api, &User{ID: "fin", Status: UserStatusActive}, "?group_by=org")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Contains(t, rec.Body.String(), "analytics_disabled")
+}
+
+func auditReq(t *testing.T, api *UsageAPI, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/audit/records"+query, nil),
+		&User{ID: "sec", Status: UserStatusActive})
+	rec := httptest.NewRecorder()
+	api.HandleAuditRecords(rec, req)
+	return rec
+}
+
+func TestAuditPassesFiltersThrough(t *testing.T) {
+	// 审计的权限由中间件按全局 audit:read 判完，处理器不再重复判定，
+	// 只负责把过滤条件如实传下去。
+	api, reader, _, _ := usageFixture(t)
+	reader.auditRows = []usage.AuditRow{{
+		Timestamp: time.Now(), RequestID: "r1", OrgID: "rd",
+		UserID: "alice", Model: "qwen-plus", StatusCode: 200,
+	}}
+
+	rec := auditReq(t, api,
+		"?org_id=rd&user_id=alice&model=qwen-plus&only_errors=true&limit=50&offset=10")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Equal(t, "rd", reader.lastAudit.OrgID)
+	require.Equal(t, "alice", reader.lastAudit.UserID)
+	require.Equal(t, "qwen-plus", reader.lastAudit.Model)
+	require.True(t, reader.lastAudit.OnlyErrors)
+	require.Equal(t, 50, reader.lastAudit.Limit)
+	require.Equal(t, 10, reader.lastAudit.Offset)
+
+	var got []struct {
+		RequestID string `json:"request_id"`
+		OrgID     string `json:"org_id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	require.Equal(t, "r1", got[0].RequestID)
+}
+
+func TestAuditTooLongRangeIs400(t *testing.T) {
+	api, _, _, _ := usageFixture(t)
+	rec := auditReq(t, api, "?from=2026-01-01&to=2026-06-01")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "range_too_long")
+}
+
+func TestAuditWithoutReaderIs503(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	api := NewUsageAPI(nil, NewPostgresOrgStore(db), authz.NewResolver(newFakeRBACStore()))
+
+	rec := auditReq(t, api, "")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	require.Contains(t, rec.Body.String(), "analytics_disabled")
 }
