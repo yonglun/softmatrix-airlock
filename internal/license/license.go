@@ -73,6 +73,11 @@ func Trial() License {
 	return License{Status: StatusTrial, Seats: TrialSeats}
 }
 
+// Verify 套用编译进二进制的内置公钥验签。生产路径走这个。
+func Verify(raw []byte, now time.Time) (License, error) {
+	return VerifyWith(trustedPublicKey(), raw, now)
+}
+
 // VerifyWith 用显式公钥验签并解析。生产路径走 Verify，
 // 这个导出版本是为了让测试能用临时密钥对，而不必给内置公钥开一个
 // 生产环境也存在的覆盖后门。

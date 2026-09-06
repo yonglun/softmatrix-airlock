@@ -172,3 +172,19 @@ func TestExpiredLicenseStillCarriesItsFields(t *testing.T) {
 	require.Equal(t, 200, lic.Seats)
 	require.Equal(t, p.ExpiresAt, lic.ExpiresAt)
 }
+
+func TestTrustedPublicKeyIsWellFormed(t *testing.T) {
+	// 内置公钥必须是 32 字节的合法 ed25519 公钥。
+	// 贴错一个字符就会让所有真实 license 验签失败，而那种故障
+	// 只有在客户机器上才会暴露——所以在这里拦住。
+	require.Len(t, trustedPublicKey(), ed25519.PublicKeySize)
+}
+
+func TestVerifyUsesTheBuiltInKey(t *testing.T) {
+	// 用临时密钥签的 license，内置公钥必须验不过。
+	// 这条守的是「有人不小心把测试密钥写进 pubkey.go」。
+	_, raw := mint(t, validPayload())
+
+	_, err := Verify(raw, time.Now())
+	require.ErrorIs(t, err, ErrBadSignature)
+}
