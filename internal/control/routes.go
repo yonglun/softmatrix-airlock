@@ -225,6 +225,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.RequestAPI)
 	}
+	licenseH := func(pick func(*LicenseGate) http.HandlerFunc) http.HandlerFunc {
+		if deps.License == nil {
+			return stub
+		}
+		return pick(deps.License)
+	}
 
 	return []Route{
 		// ---- 公开：无需登录 ----
@@ -250,6 +256,13 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			Pattern: "GET /api/whoami", Access: AccessAuthenticated,
 			License: LicenseAlways,
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleWhoami }),
+		},
+		{
+			// 不加权限门槛：横幅要对所有人显示，否则普通成员只会撞上
+			// 一串没头没脑的 402。见设计文档 §5.1。
+			Pattern: "GET /api/license", Access: AccessAuthenticated,
+			License: LicenseAlways,
+			Handler: licenseH(func(l *LicenseGate) http.HandlerFunc { return l.HandleGet }),
 		},
 
 		// ---- 组织树 ----

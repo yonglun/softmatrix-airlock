@@ -2,7 +2,10 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -116,4 +119,69 @@ func TestNilGateAllowsEverything(t *testing.T) {
 	reason, err := g.AdmitNewUser(context.Background(), time.Now())
 	require.NoError(t, err)
 	require.Empty(t, reason)
+}
+
+func TestSnapshotReportsSeatsAndDaysRemaining(t *testing.T) {
+	now := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	g := NewLicenseGate(license.License{
+		Status: license.StatusValid, Customer: "某某银行", LicenseID: "AL-7",
+		ExpiresAt: now.AddDate(0, 0, 20), Seats: 200,
+	}, countStub{n: 187})
+
+	snap, err := g.Snapshot(context.Background(), now)
+
+	require.NoError(t, err)
+	require.Equal(t, "valid", snap.Status)
+	require.Equal(t, "某某银行", snap.Customer)
+	require.Equal(t, 200, snap.Seats)
+	require.Equal(t, 187, snap.SeatsUsed)
+	require.NotNil(t, snap.DaysRemaining)
+	require.Equal(t, 20, *snap.DaysRemaining)
+}
+
+func TestSnapshotOfExpiredLicenseHasNegativeDays(t *testing.T) {
+	expires := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	g := NewLicenseGate(license.License{
+		Status: license.StatusValid, Customer: "某某银行", LicenseID: "AL-7",
+		ExpiresAt: expires, Seats: 200,
+	}, countStub{n: 187})
+
+	snap, err := g.Snapshot(context.Background(), now)
+
+	require.NoError(t, err)
+	require.Equal(t, "expired", snap.Status)
+	require.Equal(t, -3, *snap.DaysRemaining)
+}
+
+func TestSnapshotOfTrialHasNoExpiry(t *testing.T) {
+	g := NewLicenseGate(license.Trial(), countStub{n: 2})
+
+	snap, err := g.Snapshot(context.Background(), time.Now())
+
+	require.NoError(t, err)
+	require.Equal(t, "trial", snap.Status)
+	require.Equal(t, 5, snap.Seats)
+	require.Equal(t, 2, snap.SeatsUsed)
+	require.Nil(t, snap.ExpiresAt, "试用不设到期")
+	require.Nil(t, snap.DaysRemaining)
+}
+
+func TestHandleGetReturnsSnapshotJSON(t *testing.T) {
+	g := NewLicenseGate(license.License{
+		Status: license.StatusValid, Customer: "某某银行", LicenseID: "AL-7",
+		ExpiresAt: time.Now().AddDate(0, 0, 20), Seats: 200,
+	}, countStub{n: 187})
+
+	rec := httptest.NewRecorder()
+	g.HandleGet(rec, httptest.NewRequest(http.MethodGet, "/api/license", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got licenseView
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, "valid", got.Status)
+	require.Equal(t, 187, got.SeatsUsed)
+	// 视图类型带 json tag，走 snake_case——与 keyView / summaryView 一致。
+	require.Contains(t, rec.Body.String(), `"seats_used"`)
 }
