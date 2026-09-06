@@ -54,16 +54,17 @@
 
 - **`OIDC_CLIENT_SECRET`**：Casdoor 里 `airlock` 应用的客户端密钥。这一项要等你在 §4 里建好应用之后才能拿到，属于「先跑一遍脚本卡在这里、去 Casdoor 建完应用再回来填」的正常流程。
 
-- **`CASDOOR_ORIGIN`** 与 **`OIDC_REDIRECT_URL`**：**必须是浏览器实际能访问到的地址**，不能是 `localhost`（除非你确实就在这台服务器本机开浏览器）。这是最常见的配置错误——如果这台机器有一个外部可访问的主机名或 IP（比如 `airlock.example.com` 或 `10.0.1.5`），这两项就要用它，形如：
+- **`CASDOOR_ORIGIN`**、**`OIDC_ISSUER`**、**`OIDC_REDIRECT_URL`**：**必须是浏览器实际能访问到的地址**，不能是 `localhost`（除非你确实就在这台服务器本机开浏览器）。这是最常见的配置错误——如果这台机器有一个外部可访问的主机名或 IP（比如 `airlock.example.com` 或 `10.0.1.5`），这三项就要用它，形如：
 
   ```
   CASDOOR_ORIGIN=http://airlock.example.com:8000
+  OIDC_ISSUER=http://airlock.example.com:8000
   OIDC_REDIRECT_URL=http://airlock.example.com:8081/auth/callback
   ```
 
-  写错这两项的典型症状是「登录后又跳回登录页」或「OIDC 回调失败」。
+  `CASDOOR_ORIGIN` 与 `OIDC_ISSUER` **必须完全一致**——前者是 Casdoor 自己配置成什么地址，后者是 control 拿这个地址去做 OIDC 校验，两边对不上会导致登录失败（OIDC 规范要求 issuer 必须与 provider 自报的值完全匹配）。写错这几项的典型症状是「登录后又跳回登录页」或「OIDC 回调失败」。
 
-  `OIDC_ISSUER` 与这两项**不是同一回事，不要改成一样的值**。`CASDOOR_ORIGIN`/`OIDC_REDIRECT_URL` 是给浏览器用的，`OIDC_ISSUER` 是 `airlock-control` 容器自己在内部发起服务端请求时用的，必须保持模板里的默认值 `http://casdoor:8000`（compose 内部服务名，不是宿主机地址）。改成 `localhost` 会让 control 启动失败，报 `connect: connection refused`。
+  **`OIDC_DISCOVERY_URL` 不用改，保持模板默认值 `http://casdoor:8000` 即可。** 这一项是 `airlock-control` 容器自己在内部发起 OIDC discovery 时走的地址（compose 服务名 + 容器内部端口），与上面三项服务的对象不同——那三项是给浏览器看的，这一项是给 control 自己用的，改了反而会导致 control 启动失败。
 
 - **至少一个模型供应商密钥**：`DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`OPENAI_API_KEY` 三选一。没有任何一个，所有模型调用都会拿到上游 401。
 

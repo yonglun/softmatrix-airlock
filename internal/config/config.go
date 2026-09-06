@@ -19,7 +19,12 @@ type Config struct {
 	EncryptionKey     []byte
 	ControlListenAddr string
 	OIDCIssuer        string
-	OIDCClientID      string
+	// OIDCDiscoveryURL 留空时与 OIDCIssuer 相同。两者不同用于容器化部署：
+	// OIDC provider 与 control 同在一套 compose 里跑时，provider 自报的
+	// issuer 必须是浏览器能访问到的地址，但 control 发起 discovery 只能
+	// 走 compose 网络内部的服务名——见 internal/control/oidc.go 的注释。
+	OIDCDiscoveryURL string
+	OIDCClientID     string
 	OIDCClientSecret  string
 	OIDCRedirectURL   string
 	BootstrapAdmin    string
@@ -53,6 +58,7 @@ func Load(getenv Getenv) (Config, error) {
 		ClickHouseDSN:     getenv("CLICKHOUSE_DSN"),
 		ControlListenAddr: or(getenv("CONTROL_LISTEN_ADDR"), ":8081"),
 		OIDCIssuer:        getenv("OIDC_ISSUER"),
+		OIDCDiscoveryURL:  getenv("OIDC_DISCOVERY_URL"),
 		OIDCClientID:      getenv("OIDC_CLIENT_ID"),
 		OIDCClientSecret:  getenv("OIDC_CLIENT_SECRET"),
 		OIDCRedirectURL:   getenv("OIDC_REDIRECT_URL"),

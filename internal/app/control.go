@@ -92,6 +92,7 @@ func RunControl() error {
 
 	oidcClient, err := control.NewOIDCClient(ctx, control.OIDCConfig{
 		Issuer:       cfg.OIDCIssuer,
+		DiscoveryURL: cfg.OIDCDiscoveryURL,
 		ClientID:     cfg.OIDCClientID,
 		ClientSecret: cfg.OIDCClientSecret,
 		RedirectURL:  cfg.OIDCRedirectURL,
