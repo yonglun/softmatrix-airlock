@@ -132,3 +132,14 @@ export type AuditRecord = {
   cost_micro: number
   error_type: string
 }
+
+/** GET /api/license —— snake_case（视图类型有 json tag） */
+export type LicenseInfo = {
+  status: 'valid' | 'expired' | 'trial'
+  customer?: string
+  expires_at?: string
+  seats: number
+  seats_used: number
+  /** 过期后为负数；试用（不设到期）时省略 */
+  days_remaining?: number
+}
