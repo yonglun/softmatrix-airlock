@@ -59,9 +59,12 @@ func Load(getenv Getenv) (Config, error) {
 		BootstrapAdmin:    getenv("AIRLOCK_BOOTSTRAP_ADMIN"),
 		LiteLLMBaseURL:    or(getenv("LITELLM_BASE_URL"), "http://localhost:4000"),
 		LiteLLMMasterKey:  getenv("LITELLM_MASTER_KEY"),
-		SMTPAddr:          or(getenv("SMTP_ADDR"), "localhost:1025"),
-		SMTPFrom:          or(getenv("SMTP_FROM"), "airlock@example.com"),
-		LicenseFile:       getenv("AIRLOCK_LICENSE_FILE"),
+		// 留空即禁用邮件通知，与 LDAP_URL / CLICKHOUSE_DSN /
+		// LITELLM_MASTER_KEY 同一口径。私有化部署的机器上常常
+		// 根本没有 mail relay。
+		SMTPAddr:    getenv("SMTP_ADDR"),
+		SMTPFrom:    or(getenv("SMTP_FROM"), "airlock@example.com"),
+		LicenseFile: getenv("AIRLOCK_LICENSE_FILE"),
 	}
 
 	if raw := getenv("AIRLOCK_ENCRYPTION_KEY"); raw != "" {
