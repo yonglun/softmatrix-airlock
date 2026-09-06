@@ -89,10 +89,18 @@ step_load_images() {
 
     # 逐个确认镜像真的在本地了。compose 设了 pull_policy: never，
     # 缺任何一个都会在起栈时立刻失败，不如在这里先说清楚缺的是哪个。
+    #
+    # 只按 tag（去掉 @digest 后缀）校验：镜像在打包时已经按平台专属的
+    # digest 拉取、校验过架构、再打回本地 tag（见 build-release.sh），
+    # VERSION 里的 @digest 后缀只是留给人核对用的记录。docker save/load
+    # 之间 RepoTags 保真是 Docker 从不含糊的保证，RepoDigests 则因版本与
+    # 存储驱动而异，不能依赖——按 tag 查是唯一在所有 Docker 版本上都可靠
+    # 的做法。
     local missing=0
     while IFS= read -r ref; do
         [ -n "$ref" ] || continue
-        if ! docker image inspect "$ref" >/dev/null 2>&1; then
+        local tag_ref="${ref%@*}"
+        if ! docker image inspect "$tag_ref" >/dev/null 2>&1; then
             echo "  缺少镜像: $ref" >&2
             missing=1
         fi

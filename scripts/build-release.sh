@@ -57,30 +57,96 @@ docker build --platform "$PLATFORM" \
     -t "$AIRLOCK_IMAGE" .
 
 # ---- 2. 拉第三方镜像 ----
-# 从生产 compose 里读，避免两处各写一份 digest 迟早不一致。
-echo "==> 拉取第三方镜像（按 digest）"
+# 名字（tag，不含 digest）从生产 compose 里读，避免两处各写一份迟早不一致。
+echo "==> 拉取第三方镜像"
 # 排掉带 ${} 的那行（airlock 自己的镜像，上面刚 build 出来）。
 # 注意不能用 grep -oE '^\s+image: [^$]\S+' —— airlock:${VER} 是以 a 开头的，
 # 那个 [^$] 排不掉它，会把自己的镜像又拉一遍（且 registry 上根本没有）。
 # 也不用 mapfile：那是 bash 4+ 的内建，而 macOS 自带的还是 bash 3.2。
-THIRD_PARTY=()
+THIRD_PARTY_NAMES=()
 while IFS= read -r img; do
-    [ -n "$img" ] && THIRD_PARTY+=("$img")
+    [ -n "$img" ] && THIRD_PARTY_NAMES+=("$img")
 done < <(grep -E '^[[:space:]]+image: ' deploy/release/docker-compose.yml \
          | grep -v '\${' | awk '{print $2}')
 
-[ ${#THIRD_PARTY[@]} -gt 0 ] || { echo "错误: 没从 compose 里解析出第三方镜像" >&2; exit 1; }
+[ ${#THIRD_PARTY_NAMES[@]} -gt 0 ] || { echo "错误: 没从 compose 里解析出第三方镜像" >&2; exit 1; }
 
-for img in "${THIRD_PARTY[@]}"; do
-    echo "  $img"
-    # --platform 必须显式传：构建机可能是 arm64，靠默认行为会打出一个
-    # 在客户 x86 服务器上报 exec format error 的包。
-    docker pull --platform "$PLATFORM" "$img"
+# 钉死到 P1.1–P1.5b 全程实测跑通的那一份（index digest，架构无关，见
+# 设计文档 §0.2/§0.3）。这不写进生产 compose——生产环境完全离线、
+# pull_policy: never，Docker 永远不会拿它去 registry 验证，写在那里没有
+# 任何运行时效果；真正需要「钉死到实测跑通的那一份」的地方是这里，打包
+# 阶段用它去拉、去校验，再打回本地 tag 交给 compose 按 tag 引用。
+pinned_digest() {
+    case "$1" in
+        postgres:17) echo "sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675" ;;
+        clickhouse/clickhouse-server:25.3) echo "sha256:b627d7a9bc0e0c1bac26cdbe9d2fc6316faa29c5d8a174f28f5abd57d0fa6ba2" ;;
+        ghcr.io/berriai/litellm:main-stable) echo "sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4" ;;
+        casbin/casdoor:latest) echo "sha256:f332047c325588fb047bc1a34b0ce473f12ac044c0255a520f30f521fd7c249b" ;;
+        *)
+            echo "错误: ${1} 没有登记的已验证 digest" >&2
+            echo "compose 里新增了这个服务，但打包脚本还不认识它。" >&2
+            echo "先手工验证这个镜像能正常跑，再把它的 index digest 加进" >&2
+            echo "build-release.sh 的 pinned_digest() 里。" >&2
+            return 1
+            ;;
+    esac
+}
+
+command -v jq >/dev/null 2>&1 || {
+    echo "错误: 需要 jq 来解析多架构镜像清单" >&2
+    echo "安装: brew install jq（macOS）或 apt install jq（Debian/Ubuntu）" >&2
+    exit 1
+}
+
+WANT_OS="${PLATFORM%%/*}"
+WANT_ARCH="${PLATFORM##*/}"
+
+THIRD_PARTY=()  # 记进 VERSION 的完整引用：name:tag@digest，供人工审计
+for name in "${THIRD_PARTY_NAMES[@]}"; do
+    list_digest=$(pinned_digest "$name") || exit 1
+    repo="${name%%:*}"
+    ref="${name}@${list_digest}"
+    echo "  $ref"
+    THIRD_PARTY+=("$ref")
+
+    # 关键坑（P1.5c 验收时在这台机器上实测踩到过一次）：manifest-list
+    # digest 在所有架构下完全一致（这正是「按它钉死跨架构通用」的原因）。
+    # 如果本机之前已经用另一种架构拉过同一个 name:tag@digest 引用（这台
+    # 构建机很可能两种架构都手工验证过），docker pull --platform 会认为
+    # 「本地已经满足这个引用」而直接跳过实际替换，不会真的换成目标架构的
+    # 内容——且不报任何错，docker save 出来的东西会静默是错误架构，直到
+    # 客户在 x86 机器上启动容器报 exec format error 才会暴露。
+    #
+    # 解法：先用 imagetools 解析出该架构专属的 manifest digest（不是清单
+    # 列表 digest——这个值本身带架构信息，天然不会有歧义：本地缓存里的
+    # 同一个 digest 只可能对应一种架构的内容），再用它去 pull。
+    platform_digest=$(docker buildx imagetools inspect --raw "$ref" \
+        | jq -r --arg os "$WANT_OS" --arg arch "$WANT_ARCH" \
+            '.manifests[]? | select(.platform.os == $os and .platform.architecture == $arch) | .digest')
+    [ -n "$platform_digest" ] || {
+        echo "错误: ${ref} 在 registry 上找不到 ${PLATFORM} 的变体" >&2
+        exit 1
+    }
+
+    docker pull "${repo}@${platform_digest}"
+
+    # 硬校验：拉下来的东西架构必须对得上，不对就立刻失败，绝不静默放行——
+    # 这条断言就是刚才那个坑的解药。
+    got_arch=$(docker image inspect "${repo}@${platform_digest}" --format '{{.Architecture}}')
+    [ "$got_arch" = "$WANT_ARCH" ] || {
+        echo "错误: ${ref} 拉到的是 ${got_arch}，不是要求的 ${WANT_ARCH}" >&2
+        exit 1
+    }
+
+    # 打回本地 tag——生产 compose 按 tag（不是 digest）引用镜像；docker
+    # save/load 之间 RepoTags 保真是 Docker 从不含糊的保证，RepoDigests
+    # 则因版本与存储驱动而异，不能依赖（这条也是本次验收实测出来的）。
+    docker tag "${repo}@${platform_digest}" "$name"
 done
 
 # ---- 3. save ----
 echo "==> 导出镜像到 images.tar"
-docker save -o "${OUT}/images.tar" "$AIRLOCK_IMAGE" "${THIRD_PARTY[@]}"
+docker save -o "${OUT}/images.tar" "$AIRLOCK_IMAGE" "${THIRD_PARTY_NAMES[@]}"
 
 # ---- 4. VERSION 文件 ----
 echo "==> 生成 VERSION"

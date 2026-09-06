@@ -2,14 +2,27 @@
 # 受众不同、跑法也不同，合并只会两边都难读。
 #
 # 三条与开发栈的关键差别：
-#   1. 镜像按 index digest 钉死，钉的是 P1.1–P1.5b 全程实测跑通的那一份
-#   2. 每个服务 pull_policy: never——无外网机器上镜像缺失要立刻失败，
+#   1. 每个服务 pull_policy: never——无外网机器上镜像缺失要立刻失败，
 #      而不是卡五分钟 DNS 超时再抛一个看着毫无关系的错误
-#   3. 数据依赖不对宿主机暴露端口，只在 compose 网络内可达
+#   2. 数据依赖不对宿主机暴露端口，只在 compose 网络内可达
+#   3. 第三方镜像刻意只写 tag，不在这里钉 digest
+#
+# 关于第三方镜像为什么不在这里钉 digest（P1.5c 验收时的真实教训）：
+# 最初这里写的是 image: postgres:17@sha256:<digest>，直觉上更「锁死版本」。
+# 但生产部署完全离线、pull_policy: never——Docker 永远不会去 registry 验证
+# 这个 digest，运行时唯一要做的事就是在本地按这个引用找到一个已加载的
+# 镜像。而 docker save/docker load 对 RepoDigests 的保真程度因 Docker
+# 版本与存储驱动而异（较老的 overlay2 经典驱动上历史上就不可靠），带
+# digest 的引用在客户那台机器上完全可能解析失败——即便镜像明明已经
+# 正确加载。真正需要「钉死到实测跑通的那一份」的地方是打包阶段，而不是
+# 运行时：scripts/build-release.sh 里按 digest 拉取、校验架构、再打回本
+# 地 tag，version 与 digest 的对应关系记在打出来的 VERSION 文件里供审计，
+# 这里的 compose 只需要按 tag 找到本地已加载的镜像——tag 在 save/load
+# 之间保真是 Docker 从不含糊的保证。
 
 services:
   postgres:
-    image: postgres:17@sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
+    image: postgres:17
     pull_policy: never
     restart: unless-stopped
     environment:
@@ -25,7 +38,7 @@ services:
       retries: 30
 
   clickhouse:
-    image: clickhouse/clickhouse-server:25.3@sha256:b627d7a9bc0e0c1bac26cdbe9d2fc6316faa29c5d8a174f28f5abd57d0fa6ba2
+    image: clickhouse/clickhouse-server:25.3
     pull_policy: never
     restart: unless-stopped
     environment:
@@ -41,7 +54,7 @@ services:
       retries: 30
 
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
+    image: ghcr.io/berriai/litellm:main-stable
     pull_policy: never
     restart: unless-stopped
     depends_on:
@@ -60,7 +73,7 @@ services:
       - ./litellm/config.yaml:/app/config.yaml:ro
 
   casdoor:
-    image: casbin/casdoor:latest@sha256:f332047c325588fb047bc1a34b0ce473f12ac044c0255a520f30f521fd7c249b
+    image: casbin/casdoor:latest
     pull_policy: never
     restart: unless-stopped
     depends_on:
