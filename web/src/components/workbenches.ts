@@ -34,7 +34,16 @@ export const WORKBENCHES: Workbench[] = [
     id: 'finops',
     label: '成本财务',
     home: '/finops/approvals',
-    nav: [{ label: '提额审批', href: '/finops/approvals' }],
+    nav: [
+      { label: '提额审批', href: '/finops/approvals' },
+      { label: '成本总览', href: '/finops/costs' },
+    ],
+  },
+  {
+    id: 'security',
+    label: '安全合规',
+    home: '/security/audit',
+    nav: [{ label: '审计检索', href: '/security/audit' }],
   },
 ]
 

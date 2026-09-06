@@ -20,6 +20,7 @@ import (
 	"github.com/softmatrix/airlock/internal/cryptobox"
 	"github.com/softmatrix/airlock/internal/litellm"
 	"github.com/softmatrix/airlock/internal/notify"
+	"github.com/softmatrix/airlock/internal/usage"
 	"github.com/softmatrix/airlock/migrations"
 	"github.com/softmatrix/airlock/web"
 )
@@ -125,6 +126,23 @@ func RunControl() error {
 		Keys: keyStore, Orgs: orgs, Cipher: cipher, Admin: litellmAdmin,
 	})
 
+	// 用量分析是可选功能：没配 CLICKHOUSE_DSN 时控制面照常启动，
+	// 两个分析接口回「未启用」。与 LiteLLM 同步未配置时的处理同理；
+	// 与 AIRLOCK_ENCRYPTION_KEY 那种「不配就拒绝启动」的区别在于，
+	// 加密是签发的正确性前提，分析不是。
+	var usageReader control.UsageReader
+	if cfg.ClickHouseDSN != "" {
+		reader, err := usage.NewReader(cfg.ClickHouseDSN)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = reader.Close() }()
+		usageReader = reader
+		slog.Info("用量分析已启用", "dsn_host", cfg.ClickHouseDSN)
+	} else {
+		slog.Warn("未配置 CLICKHOUSE_DSN，用量分析未启用")
+	}
+
 	requests := control.NewPostgresRequestStore(db)
 	notifs := control.NewPostgresNotificationStore(db)
 
@@ -151,6 +169,7 @@ func RunControl() error {
 			SyncAPI:    control.NewSyncAPI(syncer),
 			KeyAPI:     control.NewKeyAPI(issuer, keyStore, orgs, resolver),
 			RequestAPI: control.NewRequestAPI(approval, requests, approvalWorker),
+			UsageAPI:   control.NewUsageAPI(usageReader, orgs, resolver),
 			Resolver:   resolver,
 			ConsoleFS:  web.Dist(),
 		}).Handler(),

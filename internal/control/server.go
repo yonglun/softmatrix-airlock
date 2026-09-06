@@ -15,6 +15,7 @@ type ServerDeps struct {
 	SyncAPI    *SyncAPI
 	KeyAPI     *KeyAPI
 	RequestAPI *RequestAPI
+	UsageAPI   *UsageAPI
 	Resolver   *authz.Resolver
 	// ConsoleFS 是嵌入的控制台静态站。为 nil 时该路由退化成未装配提示，
 	// 便于只测 API 的场景。

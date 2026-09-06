@@ -109,3 +109,28 @@ func TestOrgAdminCanManageKeys(t *testing.T) {
 	require.Contains(t, perms, PermKeyRead)
 	require.Contains(t, perms, PermKeyWrite)
 }
+
+func TestCostReadIsOrgScoped(t *testing.T) {
+	// 成本要能按节点授予：部门负责人该看得到自己那块花销。
+	// cost:read_all 是全局的「看全公司」，两者并存、语义不同。
+	p, ok := Lookup(PermCostRead)
+	require.True(t, ok, "cost:read 必须在权限注册表里")
+	require.Equal(t, ScopeOrg, p.Scope)
+
+	all, ok := Lookup(PermCostReadAll)
+	require.True(t, ok)
+	require.Equal(t, ScopeGlobal, all.Scope, "cost:read_all 维持全局，不受本期影响")
+}
+
+func TestOrgAdminCanReadOwnSubtreeCost(t *testing.T) {
+	require.Contains(t, roleByID(t, RoleOrgAdmin).Permissions, PermCostRead,
+		"组织管理员要看得到自己子树的成本")
+	require.NotContains(t, roleByID(t, RoleOrgAdmin).Permissions, PermCostReadAll,
+		"但不该看到全公司")
+}
+
+func TestFinOpsKeepsGlobalCostOnly(t *testing.T) {
+	// finops 是全公司成本视角，本期不给它节点级权限。
+	require.Contains(t, roleByID(t, RoleFinOps).Permissions, PermCostReadAll)
+	require.NotContains(t, roleByID(t, RoleFinOps).Permissions, PermCostRead)
+}

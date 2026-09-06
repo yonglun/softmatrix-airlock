@@ -35,6 +35,7 @@ const (
 	PermKeyWrite     = "key:write"
 	PermKeyRequest   = "key:request"
 	PermKeyRevokeAll = "key:revoke_all"
+	PermCostRead     = "cost:read"
 
 	PermAuditRead         = "audit:read"
 	PermCostReadAll       = "cost:read_all"
@@ -65,6 +66,7 @@ var registry = map[string]Permission{
 	PermKeyWrite:     {Key: PermKeyWrite, Scope: ScopeOrg, Desc: "签发与吊销密钥"},
 	PermKeyRequest:   {Key: PermKeyRequest, Scope: ScopeOrg, Desc: "发起密钥与提额申请"},
 	PermKeyRevokeAll: {Key: PermKeyRevokeAll, Scope: ScopeGlobal, Desc: "紧急吊销全系统密钥"},
+	PermCostRead:     {Key: PermCostRead, Scope: ScopeOrg, Desc: "查看所授节点子树的成本"},
 
 	PermAuditRead:         {Key: PermAuditRead, Scope: ScopeGlobal, Desc: "查看审计日志"},
 	PermCostReadAll:       {Key: PermCostReadAll, Scope: ScopeGlobal, Desc: "查看全公司成本"},
