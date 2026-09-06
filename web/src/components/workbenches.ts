@@ -39,6 +39,12 @@ export const WORKBENCHES: Workbench[] = [
       { label: '成本总览', href: '/finops/costs' },
     ],
   },
+  {
+    id: 'security',
+    label: '安全合规',
+    home: '/security/audit',
+    nav: [{ label: '审计检索', href: '/security/audit' }],
+  },
 ]
 
 /** 按服务端给的 id 列表挑出可见工作台，顺序以服务端为准。 */

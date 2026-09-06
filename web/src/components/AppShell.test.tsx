@@ -15,7 +15,10 @@ describe('visibleWorkbenches', () => {
   })
 
   it('忽略前端不认识的 id，而不是崩掉——服务端加了新工作台但前端还没跟上时不该白屏', () => {
-    expect(visibleWorkbenches(['my-space', 'security']).map((w) => w.id)).toEqual(['my-space'])
+    // security 在 P1.5a 前是「前端还不认识」的现成例子；它现在是真实
+    // 工作台了，因此换一个仍然不存在的 id 保住这条测试原本要钉住的性质。
+    expect(visibleWorkbenches(['my-space', 'not-yet-implemented']).map((w) => w.id))
+      .toEqual(['my-space'])
   })
 })
 
