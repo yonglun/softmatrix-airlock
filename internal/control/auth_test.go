@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/softmatrix/airlock/internal/license"
 )
 
 // ---- 内存假实现 ----
@@ -260,6 +262,73 @@ func newTestAuth(t *testing.T) (*Auth, *fakeUserStore, *fakeSessionStore, *fakeL
 		SecureCookie:   false,
 	})
 	return a, users, sessions, states, oidcClient
+}
+
+// newTestAuthWithLicense 与 newTestAuth 相同，但装上一个由 lic 决定的
+// LicenseGate，席位占用实时取自同一个假 user store。
+func newTestAuthWithLicense(t *testing.T, lic license.License) (*Auth, *fakeUserStore, *fakeLoginStateStore, *fakeOIDC) {
+	t.Helper()
+	users := newFakeUserStore()
+	sessions := newFakeSessionStore()
+	states := newFakeLoginStateStore()
+	oidcClient := &fakeOIDC{identity: &Identity{
+		Subject: "sub-1", Email: "zhang@example.com", DisplayName: "张伟",
+	}}
+
+	a := NewAuth(AuthDeps{
+		Users:          users,
+		Sessions:       sessions,
+		LoginStates:    states,
+		OIDC:           oidcClient,
+		BootstrapAdmin: "",
+		License:        NewLicenseGate(lic, users),
+		SecureCookie:   false,
+	})
+	return a, users, states, oidcClient
+}
+
+// doCallback 走一遍 login → callback，OIDC 桩返回 subject 指定的身份。
+// 构造流程抄自 TestCallbackCreatesSessionAndUser。
+func doCallback(t *testing.T, a *Auth, states *fakeLoginStateStore, oidcClient *fakeOIDC, subject string) *httptest.ResponseRecorder {
+	t.Helper()
+	oidcClient.identity = &Identity{
+		Subject: subject, Email: subject + "@example.com", DisplayName: subject,
+	}
+
+	loginRec := httptest.NewRecorder()
+	a.HandleLogin(loginRec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+
+	var lsID, state string
+	for id, ls := range states.data {
+		lsID, state = id, ls.State
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/auth/callback?code=c1&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: loginStateCookie, Value: lsID})
+
+	rec := httptest.NewRecorder()
+	a.HandleCallback(rec, req)
+	return rec
+}
+
+// seatLicense 造一份在期、席位数为 seats 的 license。
+func seatLicense(seats int) license.License {
+	return license.License{
+		Status: license.StatusValid, Customer: "验收客户", LicenseID: "AL-1",
+		ExpiresAt: time.Now().AddDate(1, 0, 0), Seats: seats,
+	}
+}
+
+// fillSeats 让 exts 里的每个人建档并处于 active。
+func fillSeats(t *testing.T, users *fakeUserStore, exts ...string) {
+	t.Helper()
+	for _, ext := range exts {
+		_, err := users.Upsert(context.Background(), &User{
+			ExternalID: ext, Email: ext + "@example.com", Status: UserStatusActive,
+		})
+		require.NoError(t, err)
+	}
 }
 
 // ---- 测试 ----
@@ -582,4 +651,63 @@ func TestLoginRedirectToRejectsBackslashVariant(t *testing.T) {
 		require.Equal(t, "/", ls.RedirectTo,
 			"反斜杠变体的协议相对 URL 同样是开放重定向，必须被拦截为默认的 /")
 	}
+}
+
+// ---- 席位闸 ----
+
+func TestCallbackRefusesNewUserWhenSeatsFull(t *testing.T) {
+	a, users, states, oidcClient := newTestAuthWithLicense(t, seatLicense(3))
+	fillSeats(t, users, "a", "b", "c")
+
+	rec := doCallback(t, a, states, oidcClient, "brand-new-person")
+
+	require.Equal(t, http.StatusPaymentRequired, rec.Code)
+	require.Contains(t, rec.Body.String(), "seats_exhausted")
+	require.Contains(t, rec.Body.String(), "席位已满")
+
+	// 被拒的人不该留下用户记录——否则第二次登录就变成「已建档」溜进来了。
+	_, err := users.ByExternalID(context.Background(), "brand-new-person")
+	require.ErrorIs(t, err, ErrUserNotFound)
+}
+
+func TestCallbackAllowsExistingUserWhenSeatsFull(t *testing.T) {
+	a, users, states, oidcClient := newTestAuthWithLicense(t, seatLicense(3))
+	fillSeats(t, users, "a", "b", "c")
+
+	// "a" 已建档，席位虽满也必须放行——
+	// 否则管理员自己都登不进来看红条，过期就成了死局。
+	rec := doCallback(t, a, states, oidcClient, "a")
+
+	require.Equal(t, http.StatusFound, rec.Code)
+}
+
+func TestCallbackAdmitsNewUserAfterSeatFreedByDisabling(t *testing.T) {
+	a, users, states, oidcClient := newTestAuthWithLicense(t, seatLicense(3))
+	fillSeats(t, users, "a", "b", "c")
+
+	leaver, err := users.ByExternalID(context.Background(), "b")
+	require.NoError(t, err)
+	require.NoError(t, users.MarkDisabled(context.Background(), []string{leaver.ID}))
+
+	rec := doCallback(t, a, states, oidcClient, "newcomer")
+
+	require.Equal(t, http.StatusFound, rec.Code)
+	_, err = users.ByExternalID(context.Background(), "newcomer")
+	require.NoError(t, err, "停用一人腾出席位后，新人应能建档")
+}
+
+func TestCallbackRefusesNewUserWhenLicenseExpired(t *testing.T) {
+	expired := license.License{
+		Status: license.StatusValid, Customer: "验收客户", LicenseID: "AL-OLD",
+		ExpiresAt: time.Now().Add(-24 * time.Hour),
+		Seats:     100, // 席位空着，被拒的原因只能是过期
+	}
+	a, users, states, oidcClient := newTestAuthWithLicense(t, expired)
+
+	rec := doCallback(t, a, states, oidcClient, "brand-new-person")
+
+	require.Equal(t, http.StatusPaymentRequired, rec.Code)
+	require.Contains(t, rec.Body.String(), "过期")
+	_, err := users.ByExternalID(context.Background(), "brand-new-person")
+	require.ErrorIs(t, err, ErrUserNotFound)
 }
