@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/softmatrix/airlock/internal/authz"
 )
@@ -28,6 +29,25 @@ const (
 	AccessPermission
 )
 
+// LicenseMode 声明一个端点在 license 过期后是否还放行。
+//
+// 零值是 LicenseUndeclared 而不是任何一种「有效」模式，理由与 AccessMode
+// 完全相同：默认放行会让只读降级悄悄失效，默认拒绝则会让人以为忘了声明
+// 也安全，从而不去想清楚这个端点该不该拦。
+//
+// 刻意不按 HTTP 方法自动推导。吊销（DELETE /api/keys/{id}）是写操作却
+// 必须放行——止损动作不能因为商务纠纷被拦住；而自动推导还会让将来新加的
+// POST 端点悄悄落进某一档，对不对全凭巧合。
+type LicenseMode int
+
+const (
+	LicenseUndeclared LicenseMode = iota
+	// LicenseAlways 过期后仍放行：所有读取、登录登出，以及吊销类止损操作。
+	LicenseAlways
+	// LicenseRequiresValid 过期后拒绝：签发、审批、组织与授予的写入。
+	LicenseRequiresValid
+)
+
 // TargetExtractor 从请求里取出判定用的目标节点 ID。返回 nil 表示无特定目标。
 type TargetExtractor func(r *http.Request) (*string, error)
 
@@ -37,6 +57,7 @@ type Route struct {
 	Access     AccessMode
 	Permission string          // Access 为 AccessPermission 时必填
 	Target     TargetExtractor // Access 为 AccessPermission 时必填
+	License    LicenseMode
 	Handler    http.HandlerFunc
 }
 
@@ -94,11 +115,25 @@ func subjectOf(u *User) authz.Subject {
 }
 
 // enforce 给一条路由套上判定中间件。
+//
+// 顺序是 已登录（由 RequireSession 在外层完成）→ license → 权限。
+// license 排在权限前面，是因为「授权已过期」比「没有权限」更能指明该做
+// 什么；而 license 状态本来就对所有登录用户可见（GET /api/license），
+// 不存在信息泄漏。
 func (s *Server) enforce(rt Route) http.HandlerFunc {
-	if rt.Access != AccessPermission {
-		return rt.Handler
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		if rt.License == LicenseRequiresValid {
+			if err := s.deps.License.AllowWrite(time.Now()); err != nil {
+				writeError(w, http.StatusPaymentRequired, "license_expired", err.Error())
+				return
+			}
+		}
+
+		if rt.Access != AccessPermission {
+			rt.Handler(w, r)
+			return
+		}
+
 		u, ok := UserFromContext(r.Context())
 		if !ok {
 			writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")
@@ -190,26 +225,44 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		}
 		return pick(deps.RequestAPI)
 	}
+	licenseH := func(pick func(*LicenseGate) http.HandlerFunc) http.HandlerFunc {
+		if deps.License == nil {
+			return stub
+		}
+		return pick(deps.License)
+	}
 
 	return []Route{
 		// ---- 公开：无需登录 ----
 		{
 			Pattern: "GET /healthz", Access: AccessPublic,
+			License: LicenseAlways,
 			Handler: func(w http.ResponseWriter, _ *http.Request) {
 				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			},
 		},
 		{Pattern: "GET /auth/login", Access: AccessPublic,
+			License: LicenseAlways,
 			Handler: authH(func(a *Auth) http.HandlerFunc { return a.HandleLogin })},
 		{Pattern: "GET /auth/callback", Access: AccessPublic,
+			License: LicenseAlways,
 			Handler: authH(func(a *Auth) http.HandlerFunc { return a.HandleCallback })},
 		{Pattern: "POST /auth/logout", Access: AccessPublic,
+			License: LicenseAlways,
 			Handler: authH(func(a *Auth) http.HandlerFunc { return a.HandleLogout })},
 
 		// ---- 已登录即可：查看自己的身份 ----
 		{
 			Pattern: "GET /api/whoami", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleWhoami }),
+		},
+		{
+			// 不加权限门槛：横幅要对所有人显示，否则普通成员只会撞上
+			// 一串没头没脑的 402。见设计文档 §5.1。
+			Pattern: "GET /api/license", Access: AccessAuthenticated,
+			License: LicenseAlways,
+			Handler: licenseH(func(l *LicenseGate) http.HandlerFunc { return l.HandleGet }),
 		},
 
 		// ---- 组织树 ----
@@ -219,32 +272,38 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 中间件因此不做单一目标的权限判定，只要求已登录，
 			// 与 DELETE /api/grants/{id} 把判定下沉到处理器是同一类例外。
 			Pattern: "GET /api/orgs", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleList }),
 		},
 		{
 			// parent_id 为空表示建根节点，此时目标为 nil，按边界规则要求全局授予
 			Pattern: "POST /api/orgs", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermOrgWrite, Target: TargetFromBody("parent_id"),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleCreate }),
 		},
 		{
 			Pattern: "PATCH /api/orgs/{id}/name", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermOrgWrite, Target: TargetFromPath("id"),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleRename }),
 		},
 		{
 			// 中间件只校验源节点；目标父节点的权限由处理器再查一次（见 Task 14）
 			Pattern: "PATCH /api/orgs/{id}/parent", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermOrgWrite, Target: TargetFromPath("id"),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleMove }),
 		},
 		{
 			Pattern: "DELETE /api/orgs/{id}", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermOrgDelete, Target: TargetFromPath("id"),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleDelete }),
 		},
 		{
 			Pattern: "PUT /api/orgs/{id}/key-holder", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermOrgWrite, Target: TargetFromPath("id"),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleSetKeyHolder }),
 		},
@@ -252,11 +311,13 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		// ---- 通讯录导入：作用面覆盖整棵树，要求全局授予 ----
 		{
 			Pattern: "GET /api/orgs/import/preview", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermOrgImport, Target: TargetGlobal(),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleImportPreview }),
 		},
 		{
 			Pattern: "POST /api/orgs/import/apply", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermOrgImport, Target: TargetGlobal(),
 			Handler: orgH(func(o *OrgAPI) http.HandlerFunc { return o.HandleImportApply }),
 		},
@@ -264,10 +325,12 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		// ---- 角色授予与成员归属 ----
 		{
 			Pattern: "GET /api/roles", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleListRoles }),
 		},
 		{
 			Pattern: "GET /api/orgs/{id}/grants", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermGrantRead, Target: TargetFromPath("id"),
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleListGrants }),
 		},
@@ -276,11 +339,13 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 直授的路由是两个问题，返回形状也不同，因此单开一条路由
 			// 而不是给它加查询参数。
 			Pattern: "GET /api/orgs/{id}/effective-grants", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermGrantRead, Target: TargetFromPath("id"),
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleEffectiveGrants }),
 		},
 		{
 			Pattern: "POST /api/grants", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermGrantWrite, Target: TargetFromBody("org_id"),
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleCreateGrant }),
 		},
@@ -288,16 +353,19 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 撤销授予要判定的是「授予所在的节点」，而路径里只有授予 ID，
 			// 中间件拿不到目标节点。判定下沉到 HandleDeleteGrant 自己做。
 			Pattern: "DELETE /api/grants/{id}", Access: AccessAuthenticated,
+			License: LicenseRequiresValid,
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleDeleteGrant }),
 		},
 		{
 			// 判定下沉到处理器：门槛是「在任意位置持有 grant:read」，
 			// 而 grant:read 是 ScopeOrg 权限，中间件的全局目标表达不了这个。
 			Pattern: "GET /api/users", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleListUsers }),
 		},
 		{
 			Pattern: "PUT /api/users/{id}/primary-org", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermMemberAssign, Target: TargetFromBody("org_id"),
 			Handler: grantH(func(g *GrantAPI) http.HandlerFunc { return g.HandleAssignPrimaryOrg }),
 		},
@@ -305,11 +373,13 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		// ---- LiteLLM 同步：平台级集成状态，只有平台管理员看得到 ----
 		{
 			Pattern: "GET /api/litellm/sync/status", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermPlatformConfigure, Target: TargetGlobal(),
 			Handler: syncH(func(s *SyncAPI) http.HandlerFunc { return s.HandleStatus }),
 		},
 		{
 			Pattern: "POST /api/litellm/sync", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermPlatformConfigure, Target: TargetGlobal(),
 			Handler: syncH(func(s *SyncAPI) http.HandlerFunc { return s.HandleTrigger }),
 		},
@@ -317,56 +387,69 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		// ---- 虚拟密钥 ----
 		{
 			Pattern: "POST /api/keys", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermKeyWrite, Target: TargetFromBody("org_id"),
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleIssue }),
 		},
 		{
 			Pattern: "GET /api/orgs/{id}/keys", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermKeyRead, Target: TargetFromPath("id"),
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleList }),
 		},
 		{
 			// 路径里只有密钥 ID，中间件拿不到它所属的节点。
 			// 判定下沉到 HandleRevoke 自己做，与 DELETE /api/grants/{id} 同理。
+			//
+			// 吊销是止损：过期后仍放行。拦住客户撤销一把已泄漏的密钥，
+			// 等于把商务纠纷变成对方的安全事故。见设计文档 §3。
 			Pattern: "DELETE /api/keys/{id}", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevoke }),
 		},
 		{
 			// 只返回「我是责任人」的密钥，按调用者本人过滤，
 			// 因此不需要节点级判定——与 GET /api/requests 同一先例。
 			Pattern: "GET /api/keys/mine", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleMine }),
 		},
 
 		// ---- 申请与审批 ----
 		{
 			Pattern: "POST /api/requests", Access: AccessPermission,
+			License:    LicenseRequiresValid,
 			Permission: authz.PermKeyRequest, Target: TargetFromBody("org_id"),
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleSubmit }),
 		},
 		{
 			// 只返回「我发起的」，按调用者本人过滤，因此不需要节点级判定。
 			Pattern: "GET /api/requests", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleList }),
 		},
 		{
 			// 审批人视角的待审列表。可见范围在处理器内按 key:write 的
 			// Scopes 过滤，与 GET /api/orgs 同一先例。
 			Pattern: "GET /api/requests/to-approve", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleToApprove }),
 		},
 		{
 			// 以下三条路径里只有 request ID，中间件拿不到它归属的节点，
 			// 判定下沉到处理器自己做，与 DELETE /api/keys/{id} 同理。
 			Pattern: "POST /api/requests/{id}/approve", Access: AccessAuthenticated,
+			License: LicenseRequiresValid,
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleApprove }),
 		},
 		{
 			Pattern: "POST /api/requests/{id}/reject", Access: AccessAuthenticated,
+			License: LicenseRequiresValid,
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleReject }),
 		},
 		{
 			Pattern: "POST /api/requests/{id}/claim", Access: AccessAuthenticated,
+			License: LicenseRequiresValid,
 			Handler: reqH(func(a *RequestAPI) http.HandlerFunc { return a.HandleClaim }),
 		},
 
@@ -374,11 +457,16 @@ func DefaultRoutes(deps ServerDeps) []Route {
 		{
 			// 路径里只有密钥 ID，中间件拿不到它所属的节点，
 			// 判定下沉到 HandleRotate 自己做（责任人本人或节点上的 key:write）。
+			//
+			// 轮换会产生一把新凭据，是签发而非止损，因此过期后拦下——
+			// 与紧邻的吊销路由刚好相反。
 			Pattern: "POST /api/keys/{id}/rotate", Access: AccessAuthenticated,
+			License: LicenseRequiresValid,
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRotate }),
 		},
 		{
 			Pattern: "POST /api/orgs/{id}/keys/revoke", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermKeyWrite, Target: TargetFromPath("id"),
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevokeOrg }),
 		},
@@ -386,6 +474,7 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 全系统最具破坏性的一次调用，单开一个全局权限：
 			// 塞进 platform:configure 里等于谁能改配置谁就能清空全公司凭据。
 			Pattern: "POST /api/keys/revoke-all", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermKeyRevokeAll, Target: TargetGlobal(),
 			Handler: keyH(func(k *KeyAPI) http.HandlerFunc { return k.HandleRevokeAll }),
 		},
@@ -396,11 +485,13 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 由处理器判定：中间件的单一目标表达不了「不限范围」与
 			// 「限定这些子树」这两种结果。
 			Pattern: "GET /api/usage/summary", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: usageH(func(u *UsageAPI) http.HandlerFunc { return u.HandleSummary }),
 		},
 		{
 			// 审计维持全局口径，中间件判完即可。
 			Pattern: "GET /api/audit/records", Access: AccessPermission,
+			License:    LicenseAlways,
 			Permission: authz.PermAuditRead, Target: TargetGlobal(),
 			Handler: usageH(func(u *UsageAPI) http.HandlerFunc { return u.HandleAuditRecords }),
 		},
@@ -410,12 +501,14 @@ func DefaultRoutes(deps ServerDeps) []Route {
 			// 内层 mux 的兜底：拼错的 /api/xxx 与用错方法的请求都落到这里，
 			// 返回统一形状的 JSON 404 而不是 Go 默认的 text/plain。
 			Pattern: "/api/", Access: AccessAuthenticated,
+			License: LicenseAlways,
 			Handler: APINotFoundHandler(),
 		},
 		{
 			// 必须是方法无关的 "/"：写成 "GET /" 会与 "/api/" 冲突，
 			// ServeMux 在注册时就 panic。
 			Pattern: "/", Access: AccessPublic,
+			License: LicenseAlways,
 			Handler: consoleH(),
 		},
 	}

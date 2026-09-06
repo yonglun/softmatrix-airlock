@@ -100,6 +100,8 @@ type UserStore interface {
 	MarkDisabled(ctx context.Context, userIDs []string) error
 	AssignPrimaryOrg(ctx context.Context, userID string, orgID *string) error
 	CountByPrimaryOrg(ctx context.Context, orgID string) (int, error)
+	// CountActive 数当前占用席位的用户。被停用的人不占席位。
+	CountActive(ctx context.Context) (int, error)
 }
 
 type SessionStore interface {

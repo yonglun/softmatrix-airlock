@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/softmatrix/airlock/internal/config"
 	"github.com/softmatrix/airlock/internal/control"
 	"github.com/softmatrix/airlock/internal/cryptobox"
+	"github.com/softmatrix/airlock/internal/license"
 	"github.com/softmatrix/airlock/internal/litellm"
 	"github.com/softmatrix/airlock/internal/notify"
 	"github.com/softmatrix/airlock/internal/usage"
@@ -46,6 +48,28 @@ func RunControl() error {
 	sessions := control.NewPostgresSessionStore(db)
 	loginStates := control.NewPostgresLoginStateStore(db)
 	orgs := control.NewPostgresOrgStore(db)
+
+	// 授权校验。文件损坏或签名不符时响亮失败，而不是静默退回试用——
+	// 静默降级只会让人以为 license 生效了，直到某天发现席位数根本不对。
+	// 与 AIRLOCK_ENCRYPTION_KEY 非法时拒绝启动是同一个哲学。
+	lic := license.Trial()
+	if cfg.LicenseFile != "" {
+		raw, err := os.ReadFile(cfg.LicenseFile)
+		if err != nil {
+			return fmt.Errorf("读取授权文件 %s 失败: %w", cfg.LicenseFile, err)
+		}
+		lic, err = license.Verify(raw, time.Now())
+		if err != nil {
+			return fmt.Errorf("授权文件校验失败: %w", err)
+		}
+		slog.Info("授权已加载", "customer", lic.Customer,
+			"license_id", lic.LicenseID, "seats", lic.Seats,
+			"expires_at", lic.ExpiresAt, "status", lic.Status)
+	} else {
+		slog.Warn("未配置 AIRLOCK_LICENSE_FILE，以试用模式运行",
+			"seats", license.TrialSeats)
+	}
+	licenseGate := control.NewLicenseGate(lic, users)
 
 	ctx := context.Background()
 	rbac := control.NewPostgresRBACStore(db)
@@ -83,6 +107,7 @@ func RunControl() error {
 		OIDC:           oidcClient,
 		RBAC:           rbac,
 		BootstrapAdmin: cfg.BootstrapAdmin,
+		License:        licenseGate,
 		SecureCookie:   strings.HasPrefix(cfg.OIDCRedirectURL, "https://"),
 	})
 
@@ -170,6 +195,7 @@ func RunControl() error {
 			KeyAPI:     control.NewKeyAPI(issuer, keyStore, orgs, resolver),
 			RequestAPI: control.NewRequestAPI(approval, requests, approvalWorker),
 			UsageAPI:   control.NewUsageAPI(usageReader, orgs, resolver),
+			License:    licenseGate,
 			Resolver:   resolver,
 			ConsoleFS:  web.Dist(),
 		}).Handler(),

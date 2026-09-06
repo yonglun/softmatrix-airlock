@@ -37,6 +37,8 @@ type AuthDeps struct {
 	OIDC           OIDCClient
 	RBAC           RBACStore
 	BootstrapAdmin string
+	// License 为 nil 时席位闸不生效（未装配）。
+	License *LicenseGate
 	// SecureCookie 在生产（HTTPS）下必须为 true；本地 HTTP 调试置 false。
 	SecureCookie bool
 }
@@ -120,13 +122,28 @@ func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 登录时补一次禁用检查，覆盖「刚被禁用但还没到对账周期」的窗口。
-	if existing, err := a.deps.Users.ByExternalID(r.Context(), identity.Subject); err == nil {
+	existing, err := a.deps.Users.ByExternalID(r.Context(), identity.Subject)
+	switch {
+	case err == nil:
+		// 登录时补一次禁用检查，覆盖「刚被禁用但还没到对账周期」的窗口。
 		if existing.Status != UserStatusActive {
 			writeError(w, http.StatusForbidden, "user_disabled", "该账号已被禁用")
 			return
 		}
-	} else if !errors.Is(err, ErrUserNotFound) {
+	case errors.Is(err, ErrUserNotFound):
+		// 新人开户要占一个席位。已建档用户走上面那个分支，
+		// 席位满时照常登录——否则管理员自己都进不来看红条。
+		reason, err := a.deps.License.AdmitNewUser(r.Context(), time.Now())
+		if err != nil {
+			slog.Error("校验席位失败", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "校验席位失败")
+			return
+		}
+		if reason != "" {
+			writeError(w, http.StatusPaymentRequired, "seats_exhausted", reason)
+			return
+		}
+	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "查询用户失败")
 		return
 	}

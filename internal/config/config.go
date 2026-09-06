@@ -38,6 +38,9 @@ type Config struct {
 	// KeyMaintenanceInterval 是密钥维护循环的周期：补做上游封禁、
 	// 清理过期的旧凭据。
 	KeyMaintenanceInterval time.Duration
+	// LicenseFile 是授权文件路径。留空时以试用模式运行（5 席位，不设到期）；
+	// 指向的文件损坏或签名不符时 control 拒绝启动。
+	LicenseFile string
 }
 
 const encryptionKeyLen = 32
@@ -58,6 +61,7 @@ func Load(getenv Getenv) (Config, error) {
 		LiteLLMMasterKey:  getenv("LITELLM_MASTER_KEY"),
 		SMTPAddr:          or(getenv("SMTP_ADDR"), "localhost:1025"),
 		SMTPFrom:          or(getenv("SMTP_FROM"), "airlock@example.com"),
+		LicenseFile:       getenv("AIRLOCK_LICENSE_FILE"),
 	}
 
 	if raw := getenv("AIRLOCK_ENCRYPTION_KEY"); raw != "" {

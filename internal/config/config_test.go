@@ -183,3 +183,22 @@ func TestKeyMaintenanceIntervalAcceptsPositive(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 15*time.Second, cfg.KeyMaintenanceInterval)
 }
+
+func TestLoadReadsLicenseFile(t *testing.T) {
+	cfg, err := Load(func(k string) string {
+		if k == "AIRLOCK_LICENSE_FILE" {
+			return "/etc/airlock/license.txt"
+		}
+		return ""
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "/etc/airlock/license.txt", cfg.LicenseFile)
+}
+
+func TestLoadLicenseFileDefaultsToEmpty(t *testing.T) {
+	cfg, err := Load(func(string) string { return "" })
+
+	require.NoError(t, err)
+	require.Empty(t, cfg.LicenseFile, "未配置时留空，由 app 层退回试用模式")
+}

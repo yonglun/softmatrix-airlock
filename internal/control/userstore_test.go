@@ -207,3 +207,40 @@ func TestUpsertDoesNotResetPrimaryOrg(t *testing.T) {
 	require.NotNil(t, again.PrimaryOrgID, "再次登录不得清掉归属")
 	require.Equal(t, "rd", *again.PrimaryOrgID)
 }
+
+func TestCountActiveExcludesDisabledUsers(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	store := NewPostgresUserStore(db)
+	ctx := context.Background()
+
+	for _, ext := range []string{"seat-a", "seat-b", "seat-c"} {
+		_, err := store.Upsert(ctx, &User{
+			ExternalID: ext, Email: ext + "@example.com", Status: UserStatusActive,
+		})
+		require.NoError(t, err)
+	}
+
+	n, err := store.CountActive(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+
+	// 停用一个人就该腾出一个席位——这是运维手册里唯一的自助解法。
+	u, err := store.ByExternalID(ctx, "seat-b")
+	require.NoError(t, err)
+	require.NoError(t, store.MarkDisabled(ctx, []string{u.ID}))
+
+	n, err = store.CountActive(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+}
+
+func TestCountActiveOnEmptyTableIsZero(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+
+	n, err := NewPostgresUserStore(db).CountActive(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 0, n)
+}

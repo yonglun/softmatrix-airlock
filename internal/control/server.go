@@ -16,7 +16,10 @@ type ServerDeps struct {
 	KeyAPI     *KeyAPI
 	RequestAPI *RequestAPI
 	UsageAPI   *UsageAPI
-	Resolver   *authz.Resolver
+	// License 为 nil 时表示未装配，只读降级整体不生效
+	// （与其它依赖为 nil 时退化成 501 桩是同一种处理）。
+	License  *LicenseGate
+	Resolver *authz.Resolver
 	// ConsoleFS 是嵌入的控制台静态站。为 nil 时该路由退化成未装配提示，
 	// 便于只测 API 的场景。
 	ConsoleFS fs.FS

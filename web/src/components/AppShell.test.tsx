@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { visibleWorkbenches } from './workbenches'
+import * as api from '@/lib/api'
 
 const push = vi.fn()
 vi.mock('next/navigation', () => ({
@@ -35,5 +36,18 @@ describe('AppShell', () => {
     expect(screen.getByText('平台管理')).toBeInTheDocument()
     expect(screen.queryByText('成本财务')).not.toBeInTheDocument()
     expect(screen.getByText('页面内容')).toBeInTheDocument()
+  })
+
+  it('渲染授权横幅', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({
+      status: 'trial',
+      seats: 5,
+      seats_used: 1,
+    } as never)
+
+    const { AppShell } = await import('./AppShell')
+    render(<AppShell workbenches={['platform']}>内容</AppShell>)
+
+    expect(await screen.findByText(/试用模式/)).toBeInTheDocument()
   })
 })
