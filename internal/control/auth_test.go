@@ -84,6 +84,18 @@ func (f *fakeUserStore) ListActive(context.Context) ([]*User, error) {
 	return out, nil
 }
 
+func (f *fakeUserStore) CountActive(context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, u := range f.byExt {
+		if u.Status == UserStatusActive {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (f *fakeUserStore) MarkDisabled(_ context.Context, ids []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

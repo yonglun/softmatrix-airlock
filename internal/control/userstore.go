@@ -153,3 +153,17 @@ func (s *postgresUserStore) CountByPrimaryOrg(ctx context.Context, orgID string)
 	}
 	return n, nil
 }
+
+// CountActive 数当前占用席位的用户。
+//
+// 席位闸只在「新用户首次登录」时调它一次——登录是低频动作，
+// 不需要缓存；每请求数一遍是纯粹的浪费。
+func (s *postgresUserStore) CountActive(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM users WHERE status = $1`, UserStatusActive).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计活跃用户数失败: %w", err)
+	}
+	return n, nil
+}
