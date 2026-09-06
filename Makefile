@@ -1,4 +1,4 @@
-.PHONY: test build lint up down migrate console console-install
+.PHONY: test build lint up down migrate console console-install release
 
 test:
 	go test ./... -race -count=1
@@ -47,3 +47,10 @@ down:
 
 migrate:
 	go run ./cmd/airlock migrate
+
+# 打交付包。需要外网（要拉第三方镜像）。
+# 目标平台默认 linux/amd64，出 arm64 包：
+#   make release PLATFORM=linux/arm64
+PLATFORM ?= linux/amd64
+release:
+	scripts/build-release.sh --platform $(PLATFORM)
