@@ -15,6 +15,8 @@ bin/
 .DS_Store
 coverage.out
 /streambuffer
+# go build ./cmd/licensegen 在仓库根留下的二进制
+/licensegen
 
 # License 签发私钥。绝不入库——一旦泄漏，任何人都能签发任意席位、
 # 任意到期时间的 license。
