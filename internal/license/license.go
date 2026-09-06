@@ -6,7 +6,12 @@
 package license
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -66,4 +71,80 @@ type License struct {
 // Trial 返回内置试用额度。未配置 AIRLOCK_LICENSE_FILE 时用它。
 func Trial() License {
 	return License{Status: StatusTrial, Seats: TrialSeats}
+}
+
+// VerifyWith 用显式公钥验签并解析。生产路径走 Verify，
+// 这个导出版本是为了让测试能用临时密钥对，而不必给内置公钥开一个
+// 生产环境也存在的覆盖后门。
+func VerifyWith(pub ed25519.PublicKey, raw []byte, now time.Time) (License, error) {
+	body, sig, err := split(raw)
+	if err != nil {
+		return License{}, err
+	}
+
+	// 先验签，后解析。顺序不能反：JSON 解析器不该接触未经认证的输入。
+	if !ed25519.Verify(pub, body, sig) {
+		return License{}, ErrBadSignature
+	}
+
+	var p Payload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return License{}, fmt.Errorf("%w: payload 不是合法 JSON", ErrInvalidPayload)
+	}
+	if p.V != FormatVersion {
+		return License{}, fmt.Errorf("%w: 收到版本 %d，本版本只认识 %d，请升级 Airlock",
+			ErrUnsupportedVersion, p.V, FormatVersion)
+	}
+	if err := p.Validate(); err != nil {
+		return License{}, err
+	}
+
+	lic := License{
+		Status:    StatusValid,
+		Customer:  p.Customer,
+		LicenseID: p.LicenseID,
+		IssuedAt:  p.IssuedAt,
+		ExpiresAt: p.ExpiresAt,
+		Seats:     p.Seats,
+	}
+	// ExpiresAt 是排他上界：签成「次日零点」，于是合同上写的那一天当天仍然可用。
+	if !now.Before(p.ExpiresAt) {
+		lic.Status = StatusExpired
+	}
+	return lic, nil
+}
+
+// split 把 "payload.signature" 拆成两段解码后的字节。
+func split(raw []byte) (body, sig []byte, err error) {
+	parts := strings.Split(string(raw), ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return nil, nil, fmt.Errorf("%w: 应为 payload.signature 两段", ErrMalformed)
+	}
+	body, err = base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: payload 段不是合法 base64url", ErrMalformed)
+	}
+	sig, err = base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: 签名段不是合法 base64url", ErrMalformed)
+	}
+	return body, sig, nil
+}
+
+// Validate 检查 payload 内容本身是否合法。
+// 签发端与校验端共用，保证「签发工具造不出来的 license，校验端也不认」。
+func (p Payload) Validate() error {
+	if p.Seats <= 0 {
+		return fmt.Errorf("%w: 席位数必须为正，收到 %d", ErrInvalidPayload, p.Seats)
+	}
+	if p.Customer == "" {
+		return fmt.Errorf("%w: 客户名不能为空", ErrInvalidPayload)
+	}
+	if p.LicenseID == "" {
+		return fmt.Errorf("%w: license_id 不能为空", ErrInvalidPayload)
+	}
+	if p.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: 必须设置到期时间", ErrInvalidPayload)
+	}
+	return nil
 }
