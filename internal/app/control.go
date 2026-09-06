@@ -292,7 +292,7 @@ func RunControl() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("Control 启动",
+		slog.Info("Control 启动", "version", Version,
 			"addr", cfg.ControlListenAddr, "issuer", cfg.OIDCIssuer,
 			"reconcile_interval", cfg.ReconcileInterval)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
