@@ -182,6 +182,7 @@ docker compose restart airlock-control
 | 登录后跳回登录页 / 回调失败 | `OIDC_REDIRECT_URL` 与浏览器实际访问的地址不一致 | 两者必须完全一致，含协议、主机名与端口 |
 | 控制台能开但数据面调用报上游 401 | 供应商密钥未配或无效 | 检查 `.env` 里的 `DEEPSEEK_API_KEY` 等，改完 `docker compose restart litellm` |
 | 用量与成本页面空白 | `airlock.usage_records` 表不存在 | 重跑 `./install.sh`（第 5 步幂等）；确认 `CLICKHOUSE_DSN` 已配置 |
+| casdoor 容器不断重启，日志有 `panic: pq: database "casdoor" does not exist` | `litellm`/`casdoor` 数据库没建出来 | 用官方 `install.sh` 全流程安装（它会在起 casdoor 之前先建库）；若是手工分步操作导致的，手动执行一次 `docker compose exec -T postgres psql -U <用户> -d postgres < schema/postgres-init.sql` 再重启 casdoor |
 | 控制台顶部红条，写操作返回 402 | 授权已过期 | 换新 license 后 `docker compose restart airlock-control`；AI 调用不受影响 |
 | 新成员登录报「席位已满」 | 席位用尽 | 停用离职成员腾出席位，或联系供应方扩容 |
 | 审批邮件没收到 | 未配置 `SMTP_ADDR` | 预期行为，见 §6。需要发信就填内网 relay 后重启 control |

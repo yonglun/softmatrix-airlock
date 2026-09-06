@@ -221,15 +221,49 @@ wait_healthy() {
     return 1
 }
 
+# create_pg_databases 建 litellm / casdoor 各自的数据库。
+#
+# 必须在 postgres 健康、但 litellm/casdoor 还没起来之前做完——Casdoor
+# 连接时如果 dbname=casdoor 不存在会直接 panic 退出，不会自己建库；
+# LiteLLM（走 Prisma）在这一点上更宽容，但两边都靠这一步先把库建好，
+# 不能等整个栈都起来之后再补（P1.5c 验收时在这台机器上真实撞见过
+# Casdoor 的 panic: pq: database "casdoor" does not exist）。
+create_pg_databases() {
+    info "  创建 litellm / casdoor 数据库…"
+    local pg_user
+    pg_user=$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)
+    docker compose exec -T postgres psql -U "$pg_user" -d postgres < schema/postgres-init.sql >/dev/null || die \
+        "创建 litellm / casdoor 数据库失败" \
+        "确认 postgres 容器健康：docker compose ps postgres" \
+        "查看日志：docker compose logs postgres"
+}
+
 step_up() {
     info "第 4/5 步：启动服务"
+
+    # 先只起两个数据存储，等它们健康、把库建好，再起依赖它们的一切——
+    # 顺序不能反，理由见 create_pg_databases 的注释。
+    docker compose up -d postgres clickhouse || die \
+        "docker compose up 失败（postgres/clickhouse）" \
+        "若报镜像不存在，重新执行本脚本让第 2 步重新导入" \
+        "若报端口被占用，改 .env 里的端口配置"
+
+    for svc in postgres clickhouse; do
+        info "  等待 ${svc} 就绪…"
+        wait_healthy "$svc" || die \
+            "${svc} 启动失败（日志见上）" \
+            "对照运维手册的故障排查表定位上面的报错" \
+            "修正 .env 后重新执行本脚本"
+    done
+
+    create_pg_databases
 
     docker compose up -d || die \
         "docker compose up 失败" \
         "若报镜像不存在，重新执行本脚本让第 2 步重新导入" \
         "若报端口被占用，改 .env 里的 CONTROL_PORT / EDGE_PORT / CASDOOR_PORT"
 
-    for svc in postgres clickhouse litellm casdoor airlock-control airlock-edge; do
+    for svc in litellm casdoor airlock-control airlock-edge; do
         info "  等待 ${svc} 就绪…"
         wait_healthy "$svc" || die \
             "${svc} 启动失败（日志见上）" \
@@ -242,19 +276,16 @@ step_up() {
 
 # ---------- 第 5 步：初始化 schema 并自检 ----------
 step_schema() {
-    info "第 5/5 步：初始化 schema 并自检"
+    info "第 5/5 步：初始化 ClickHouse 并自检"
 
-    # 一律用 -f2-（不是 -f2）：base64 的 padding 与 URL 查询串里都可能出现 =，
-    # 截断了就会拿到半截口令，且错误现象是「认证失败」，与真实原因看不出关系。
-    local pg_user ch_user ch_pass
-    pg_user=$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)
+    # litellm/casdoor 的数据库已经在第 4 步（起栈之前）建好了；这里只做
+    # ClickHouse 那张用量表——它不影响任何容器能不能启动，放在全部服务
+    # 起来之后做没问题。一律用 -f2-（不是 -f2）：base64 的 padding 与
+    # URL 查询串里都可能出现 =，截断了就会拿到半截口令，且错误现象是
+    # 「认证失败」，与真实原因看不出关系。
+    local ch_user ch_pass
     ch_user=$(grep '^CLICKHOUSE_USER=' .env | cut -d= -f2-)
     ch_pass=$(grep '^CLICKHOUSE_PASSWORD=' .env | cut -d= -f2-)
-
-    docker compose exec -T postgres psql -U "$pg_user" -d postgres < schema/postgres-init.sql >/dev/null || die \
-        "创建 litellm / casdoor 数据库失败" \
-        "确认 postgres 容器健康：docker compose ps postgres" \
-        "查看日志：docker compose logs postgres"
 
     docker compose exec -T clickhouse clickhouse-client \
         --user "$ch_user" --password "$ch_pass" --multiquery < schema/clickhouse-init.sql >/dev/null || die \
