@@ -1,0 +1,148 @@
+# Airlock 生产栈。与 deploy/docker-compose.yml（开发栈）是两套独立文件：
+# 受众不同、跑法也不同，合并只会两边都难读。
+#
+# 三条与开发栈的关键差别：
+#   1. 镜像按 index digest 钉死，钉的是 P1.1–P1.5b 全程实测跑通的那一份
+#   2. 每个服务 pull_policy: never——无外网机器上镜像缺失要立刻失败，
+#      而不是卡五分钟 DNS 超时再抛一个看着毫无关系的错误
+#   3. 数据依赖不对宿主机暴露端口，只在 compose 网络内可达
+
+services:
+  postgres:
+    image: postgres:17@sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3@sha256:b627d7a9bc0e0c1bac26cdbe9d2fc6316faa29c5d8a174f28f5abd57d0fa6ba2
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+    volumes:
+      - chdata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      # 配置文件里刻意不写 database_url，改走这个环境变量——
+      # 否则口令要硬编码进 config.yaml，而口令是安装时随机生成的。
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/litellm
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+
+  casdoor:
+    image: casbin/casdoor:latest@sha256:f332047c325588fb047bc1a34b0ce473f12ac044c0255a520f30f521fd7c249b
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      driverName: postgres
+      dataSourceName: "user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} host=postgres port=5432 sslmode=disable dbname=casdoor"
+      tableNamePrefix: casdoor_
+      # 浏览器要能访问到这个地址，所以它必须是对外的主机名/IP，
+      # 不能写 localhost（除非就在这台机器上用浏览器）。
+      origin: ${CASDOOR_ORIGIN}
+    ports:
+      - "${CASDOOR_PORT}:8000"
+
+  airlock-control:
+    image: airlock:${AIRLOCK_VERSION}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["control"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      CLICKHOUSE_DSN: clickhouse://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000/${CLICKHOUSE_DB}
+      AIRLOCK_ENCRYPTION_KEY: ${AIRLOCK_ENCRYPTION_KEY}
+      CONTROL_LISTEN_ADDR: ":8081"
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL}
+      AIRLOCK_BOOTSTRAP_ADMIN: ${AIRLOCK_BOOTSTRAP_ADMIN}
+      AIRLOCK_LICENSE_FILE: ${AIRLOCK_LICENSE_FILE}
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      SMTP_ADDR: ${SMTP_ADDR}
+      SMTP_FROM: ${SMTP_FROM}
+      LDAP_URL: ${LDAP_URL}
+      LDAP_BIND_DN: ${LDAP_BIND_DN}
+      LDAP_BIND_PASSWORD: ${LDAP_BIND_PASSWORD}
+      LDAP_BASE_DN: ${LDAP_BASE_DN}
+    volumes:
+      # 授权文件。留空时 AIRLOCK_LICENSE_FILE 也为空，control 走试用模式。
+      - ${LICENSE_HOST_PATH:-/dev/null}:/etc/airlock/license.txt:ro
+    ports:
+      - "${CONTROL_PORT}:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8081/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  airlock-edge:
+    image: airlock:${AIRLOCK_VERSION}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["edge"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      airlock-control:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      CLICKHOUSE_DSN: clickhouse://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000/${CLICKHOUSE_DB}
+      AIRLOCK_ENCRYPTION_KEY: ${AIRLOCK_ENCRYPTION_KEY}
+      EDGE_LISTEN_ADDR: ":8080"
+      EDGE_UPSTREAM_BASE_URL: http://litellm:4000
+    ports:
+      - "${EDGE_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  pgdata:
+  chdata:
