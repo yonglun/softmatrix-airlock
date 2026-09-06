@@ -1,0 +1,29 @@
+# 生产版上游模型配置。
+#
+# 与 deploy/litellm/config.yaml（开发栈）的关键差别：**不含 database_url**。
+# 开发那份把 postgresql://airlock:airlock_dev@... 硬编码在文件里，而
+# install.sh 会生成随机的 Postgres 口令，照抄必然连不上库。
+# 生产改用 DATABASE_URL 环境变量——已实测：只给环境变量、配置里不写
+# database_url 时，LiteLLM 正常执行 prisma migrate deploy 并连上库。
+#
+# 客户要接自己的模型时改这个文件，然后 docker compose restart litellm。
+
+model_list:
+  - model_name: deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: qwen-plus
+    litellm_params:
+      model: openai/qwen-plus
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key: os.environ/DASHSCOPE_API_KEY
+
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
