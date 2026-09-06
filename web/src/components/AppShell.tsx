@@ -3,6 +3,7 @@
 import { Layout, Menu } from 'antd'
 import { usePathname, useRouter } from 'next/navigation'
 import { visibleWorkbenches } from './workbenches'
+import { LicenseBanner } from './LicenseBanner'
 
 const { Header, Sider, Content } = Layout
 
@@ -52,7 +53,11 @@ export function AppShell({
             style={{ height: '100%' }}
           />
         </Sider>
-        <Content style={{ padding: 24 }}>{children}</Content>
+        {/* 横幅横跨整个内容区、不被侧栏挤窄，所以放在这一层而不是 Content 里面 */}
+        <Layout>
+          <LicenseBanner />
+          <Content style={{ padding: 24 }}>{children}</Content>
+        </Layout>
       </Layout>
     </Layout>
   )
