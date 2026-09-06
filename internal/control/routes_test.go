@@ -194,6 +194,56 @@ func TestEveryRouteDeclaresAccess(t *testing.T) {
 	}
 }
 
+func TestEveryRouteDeclaresLicenseMode(t *testing.T) {
+	// 机械检查之三：漏声明 license 行为就挂。
+	// LicenseMode 的零值是 LicenseUndeclared，忘了写会停在这里。
+	for _, rt := range DefaultRoutes(ServerDeps{}) {
+		require.NotEqual(t, LicenseUndeclared, rt.License,
+			"路由 %s 没有声明 license 过期后的行为", rt.Pattern)
+	}
+}
+
+// 吊销是止损动作。客户发现密钥泄漏时，如果因为 license 过期而拦住他撤销，
+// 我们就是在把商务纠纷变成对方的安全事故。这条测试把那个豁免钉死。
+func TestRevocationRoutesSurviveExpiry(t *testing.T) {
+	exempt := map[string]bool{
+		"DELETE /api/keys/{id}":           true,
+		"POST /api/orgs/{id}/keys/revoke": true,
+		"POST /api/keys/revoke-all":       true,
+	}
+	seen := map[string]bool{}
+
+	for _, rt := range DefaultRoutes(ServerDeps{}) {
+		if exempt[rt.Pattern] {
+			seen[rt.Pattern] = true
+			require.Equal(t, LicenseAlways, rt.License,
+				"吊销类路由 %s 必须在过期后仍然放行", rt.Pattern)
+		}
+	}
+	require.Len(t, seen, len(exempt), "有吊销路由被改名或删除了，请同步这条测试")
+}
+
+// 签发类必须被拦住，否则「只读降级」名不副实。
+func TestIssuanceRoutesRequireValidLicense(t *testing.T) {
+	required := map[string]bool{
+		"POST /api/keys":                  true,
+		"POST /api/keys/{id}/rotate":      true,
+		"POST /api/orgs":                  true,
+		"POST /api/grants":                true,
+		"POST /api/requests/{id}/approve": true,
+	}
+	seen := map[string]bool{}
+
+	for _, rt := range DefaultRoutes(ServerDeps{}) {
+		if required[rt.Pattern] {
+			seen[rt.Pattern] = true
+			require.Equal(t, LicenseRequiresValid, rt.License,
+				"路由 %s 必须在 license 过期后被拦下", rt.Pattern)
+		}
+	}
+	require.Len(t, seen, len(required), "有路由被改名或删除了，请同步这条测试")
+}
+
 func TestNonPublicRoutesLiveUnderAPIPrefix(t *testing.T) {
 	// Handler() 把非公开路由挂在 /api/ 的会话中间件之后。
 	// 一条非公开路由若不在 /api/ 下，就会绕过会话校验——必须拦住。
