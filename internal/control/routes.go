@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/softmatrix/airlock/internal/authz"
 )
@@ -114,11 +115,25 @@ func subjectOf(u *User) authz.Subject {
 }
 
 // enforce 给一条路由套上判定中间件。
+//
+// 顺序是 已登录（由 RequireSession 在外层完成）→ license → 权限。
+// license 排在权限前面，是因为「授权已过期」比「没有权限」更能指明该做
+// 什么；而 license 状态本来就对所有登录用户可见（GET /api/license），
+// 不存在信息泄漏。
 func (s *Server) enforce(rt Route) http.HandlerFunc {
-	if rt.Access != AccessPermission {
-		return rt.Handler
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		if rt.License == LicenseRequiresValid {
+			if err := s.deps.License.AllowWrite(time.Now()); err != nil {
+				writeError(w, http.StatusPaymentRequired, "license_expired", err.Error())
+				return
+			}
+		}
+
+		if rt.Access != AccessPermission {
+			rt.Handler(w, r)
+			return
+		}
+
 		u, ok := UserFromContext(r.Context())
 		if !ok {
 			writeError(w, http.StatusInternalServerError, "internal_error", "上下文缺少用户")

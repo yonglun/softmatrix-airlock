@@ -10,10 +10,12 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/softmatrix/airlock/internal/authz"
+	"github.com/softmatrix/airlock/internal/license"
 )
 
 func okHandler(w http.ResponseWriter, _ *http.Request) {
@@ -192,6 +194,86 @@ func TestEveryRouteDeclaresAccess(t *testing.T) {
 			require.NotNil(t, rt.Target, "路由 %s 需要权限判定却没有目标提取器", rt.Pattern)
 		}
 	}
+}
+
+// expiredGate 造一个已过期的 gate。
+func expiredGate() *LicenseGate {
+	return NewLicenseGate(license.License{
+		Status:    license.StatusValid,
+		Customer:  "过期客户",
+		LicenseID: "AL-OLD",
+		ExpiresAt: time.Now().Add(-24 * time.Hour),
+		Seats:     100,
+	}, countStub{n: 0})
+}
+
+func TestExpiredLicenseBlocksRequiresValidRoute(t *testing.T) {
+	hit := false
+	srv := NewServer(ServerDeps{
+		License: expiredGate(),
+		Routes: []Route{{
+			Pattern: "POST /api/things", Access: AccessAuthenticated,
+			License: LicenseRequiresValid,
+			Handler: func(w http.ResponseWriter, _ *http.Request) { hit = true },
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/things", nil)
+	rec := httptest.NewRecorder()
+	srv.enforce(srv.Routes()[0])(rec, req)
+
+	require.Equal(t, http.StatusPaymentRequired, rec.Code)
+	require.Contains(t, rec.Body.String(), "license_expired")
+	require.False(t, hit, "被拦下的请求不该到达处理器")
+}
+
+func TestExpiredLicenseStillAllowsAlwaysRoute(t *testing.T) {
+	hit := false
+	srv := NewServer(ServerDeps{
+		License: expiredGate(),
+		Routes: []Route{{
+			Pattern: "DELETE /api/things/{id}", Access: AccessAuthenticated,
+			License: LicenseAlways,
+			Handler: func(w http.ResponseWriter, _ *http.Request) {
+				hit = true
+				w.WriteHeader(http.StatusOK)
+			},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/things/k1", nil)
+	rec := httptest.NewRecorder()
+	srv.enforce(srv.Routes()[0])(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.True(t, hit, "吊销类路由在过期后必须仍能执行")
+}
+
+func TestValidLicenseAllowsRequiresValidRoute(t *testing.T) {
+	hit := false
+	gate := NewLicenseGate(license.License{
+		Status: license.StatusValid, Customer: "在期客户", LicenseID: "AL-NEW",
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour), Seats: 100,
+	}, countStub{n: 0})
+
+	srv := NewServer(ServerDeps{
+		License: gate,
+		Routes: []Route{{
+			Pattern: "POST /api/things", Access: AccessAuthenticated,
+			License: LicenseRequiresValid,
+			Handler: func(w http.ResponseWriter, _ *http.Request) {
+				hit = true
+				w.WriteHeader(http.StatusOK)
+			},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/things", nil)
+	rec := httptest.NewRecorder()
+	srv.enforce(srv.Routes()[0])(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.True(t, hit)
 }
 
 func TestEveryRouteDeclaresLicenseMode(t *testing.T) {
