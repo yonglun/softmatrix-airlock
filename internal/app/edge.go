@@ -77,7 +77,8 @@ func RunEdge() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("Edge 启动", "addr", cfg.EdgeListenAddr, "upstream", cfg.UpstreamBaseURL)
+		slog.Info("Edge 启动", "version", Version,
+			"addr", cfg.EdgeListenAddr, "upstream", cfg.UpstreamBaseURL)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

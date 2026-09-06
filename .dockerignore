@@ -1,0 +1,24 @@
+# 构建上下文越小越好：.git 有几十 MB，node_modules 更大，
+# 而且它们都会在镜像里被重新生成或根本用不到。
+.git
+.gitignore
+.claude
+.superpowers
+
+node_modules
+web/node_modules
+
+# 宿主机的构建产物。web/dist 尤其重要：它由 console 阶段重新生成，
+# 带进去只会让构建缓存失效，还可能把一份过期的控制台塞进镜像。
+web/dist
+bin
+build
+dist
+
+docs
+deploy
+*.log
+*.key
+.env
+.env.*
+coverage.out

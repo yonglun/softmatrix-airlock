@@ -140,7 +140,8 @@ func TestLiteLLMBaseURLIsSeparateFromEdgeUpstream(t *testing.T) {
 func TestApprovalDefaults(t *testing.T) {
 	cfg, err := Load(func(string) string { return "" })
 	require.NoError(t, err)
-	require.Equal(t, "localhost:1025", cfg.SMTPAddr)
+	// P1.5c：SMTP 改为留空即禁用，不再有默认值。
+	require.Empty(t, cfg.SMTPAddr)
 	require.Equal(t, "airlock@example.com", cfg.SMTPFrom)
 	require.Equal(t, 30*time.Second, cfg.ApprovalWorkerInterval)
 }

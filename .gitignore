@@ -2,6 +2,10 @@
 node_modules/
 .env
 .env.*
+# .env.example 是模板，不含密钥，必须能提交——.env.* 规则本意是挡真实
+# 配置文件，不该连同示例模板一起挡掉。deploy/release/ 下也有一份同名模板。
+!.env.example
+!deploy/release/.env.example
 dist/
 # web/dist 的构建产物仍要忽略，但 .gitkeep 必须能提交——//go:embed all:dist
 # 要求该目录在编译期存在，空目录会让 go build ./... 直接失败。

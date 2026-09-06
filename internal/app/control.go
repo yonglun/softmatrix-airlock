@@ -92,6 +92,7 @@ func RunControl() error {
 
 	oidcClient, err := control.NewOIDCClient(ctx, control.OIDCConfig{
 		Issuer:       cfg.OIDCIssuer,
+		DiscoveryURL: cfg.OIDCDiscoveryURL,
 		ClientID:     cfg.OIDCClientID,
 		ClientSecret: cfg.OIDCClientSecret,
 		RedirectURL:  cfg.OIDCRedirectURL,
@@ -176,13 +177,25 @@ func RunControl() error {
 		Orgs: orgs, RBAC: rbac, Users: users,
 		Issuer: issuer, Resolver: resolver,
 	})
+
+	// 邮件通知是可选功能：没配 SMTP_ADDR 时用空实现，只记日志不发信。
+	// 与 LDAP_URL / CLICKHOUSE_DSN / LITELLM_MASTER_KEY 未配置时的
+	// 处理同理——私有化部署的机器上常常根本没有 mail relay。
+	var sender notify.Sender = notify.DisabledSender{}
+	if cfg.SMTPAddr != "" {
+		sender = notify.NewSMTPSender(notify.SMTPConfig{
+			Addr: cfg.SMTPAddr, From: cfg.SMTPFrom,
+		})
+		slog.Info("邮件通知已启用", "smtp", cfg.SMTPAddr, "from", cfg.SMTPFrom)
+	} else {
+		slog.Warn("未配置 SMTP_ADDR，邮件通知未启用")
+	}
+
 	approvalWorker := control.NewApprovalWorker(control.ApprovalWorkerDeps{
 		Requests: requests, Notifs: notifs, Keys: keyStore, Users: users,
 		Admin:  litellmAdmin,
 		Cipher: cipher,
-		Sender: notify.NewSMTPSender(notify.SMTPConfig{
-			Addr: cfg.SMTPAddr, From: cfg.SMTPFrom,
-		}),
+		Sender: sender,
 	})
 
 	srv := &http.Server{
@@ -235,8 +248,7 @@ func RunControl() error {
 	}
 
 	go approvalWorker.Run(runCtx, cfg.ApprovalWorkerInterval)
-	slog.Info("审批 worker 已启动",
-		"interval", cfg.ApprovalWorkerInterval, "smtp", cfg.SMTPAddr)
+	slog.Info("审批 worker 已启动", "interval", cfg.ApprovalWorkerInterval)
 
 	// 滞留的 pending 是「上游调用与 MarkActive 之间崩掉」留下的残骸。
 	// 阈值取 10 分钟：远大于一次签发的正常耗时，不会误伤进行中的签发。
@@ -292,7 +304,7 @@ func RunControl() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("Control 启动",
+		slog.Info("Control 启动", "version", Version,
 			"addr", cfg.ControlListenAddr, "issuer", cfg.OIDCIssuer,
 			"reconcile_interval", cfg.ReconcileInterval)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

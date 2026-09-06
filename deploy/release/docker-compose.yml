@@ -1,0 +1,175 @@
+# Airlock 生产栈。与 deploy/docker-compose.yml（开发栈）是两套独立文件：
+# 受众不同、跑法也不同，合并只会两边都难读。
+#
+# 三条与开发栈的关键差别：
+#   1. 每个服务 pull_policy: never——无外网机器上镜像缺失要立刻失败，
+#      而不是卡五分钟 DNS 超时再抛一个看着毫无关系的错误
+#   2. 数据依赖不对宿主机暴露端口，只在 compose 网络内可达
+#   3. 第三方镜像刻意只写 tag，不在这里钉 digest
+#
+# 关于第三方镜像为什么不在这里钉 digest（P1.5c 验收时的真实教训）：
+# 最初这里写的是 image: postgres:17@sha256:<digest>，直觉上更「锁死版本」。
+# 但生产部署完全离线、pull_policy: never——Docker 永远不会去 registry 验证
+# 这个 digest，运行时唯一要做的事就是在本地按这个引用找到一个已加载的
+# 镜像。而 docker save/docker load 对 RepoDigests 的保真程度因 Docker
+# 版本与存储驱动而异（较老的 overlay2 经典驱动上历史上就不可靠），带
+# digest 的引用在客户那台机器上完全可能解析失败——即便镜像明明已经
+# 正确加载。真正需要「钉死到实测跑通的那一份」的地方是打包阶段，而不是
+# 运行时：scripts/build-release.sh 里按 digest 拉取、校验架构、再打回本
+# 地 tag，version 与 digest 的对应关系记在打出来的 VERSION 文件里供审计，
+# 这里的 compose 只需要按 tag 找到本地已加载的镜像——tag 在 save/load
+# 之间保真是 Docker 从不含糊的保证。
+
+services:
+  postgres:
+    image: postgres:17
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+    volumes:
+      - chdata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      # 配置文件里刻意不写 database_url，改走这个环境变量——
+      # 否则口令要硬编码进 config.yaml，而口令是安装时随机生成的。
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/litellm
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+
+  casdoor:
+    image: casbin/casdoor:latest
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      driverName: postgres
+      dataSourceName: "user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} host=postgres port=5432 sslmode=disable dbname=casdoor"
+      tableNamePrefix: casdoor_
+      # 浏览器要能访问到这个地址，所以它必须是对外的主机名/IP，
+      # 不能写 localhost（除非就在这台机器上用浏览器）。
+      origin: ${CASDOOR_ORIGIN}
+    ports:
+      - "${CASDOOR_PORT}:8000"
+    healthcheck:
+      # 探的是 airlock-control 实际要用的那个端点——OIDC discovery。
+      # 这个响应就绪，就意味着 control 起来后重试也一定能成功。
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/.well-known/openid-configuration"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  airlock-control:
+    image: airlock:${AIRLOCK_VERSION}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["control"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      # control 启动时会立刻发起一次 OIDC discovery，失败就直接退出
+      # （见 internal/control/oidc.go）——它不会自己重试。不等 casdoor
+      # 就绪就起 control 是一个真实存在的竞态：Casdoor 自己还要跑一遍
+      # Postgres 迁移，起得比 control 慢是常态，不是偶发。
+      casdoor:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      CLICKHOUSE_DSN: clickhouse://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000/${CLICKHOUSE_DB}
+      AIRLOCK_ENCRYPTION_KEY: ${AIRLOCK_ENCRYPTION_KEY}
+      CONTROL_LISTEN_ADDR: ":8081"
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL}
+      AIRLOCK_BOOTSTRAP_ADMIN: ${AIRLOCK_BOOTSTRAP_ADMIN}
+      AIRLOCK_LICENSE_FILE: ${AIRLOCK_LICENSE_FILE}
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      SMTP_ADDR: ${SMTP_ADDR}
+      SMTP_FROM: ${SMTP_FROM}
+      LDAP_URL: ${LDAP_URL}
+      LDAP_BIND_DN: ${LDAP_BIND_DN}
+      LDAP_BIND_PASSWORD: ${LDAP_BIND_PASSWORD}
+      LDAP_BASE_DN: ${LDAP_BASE_DN}
+    volumes:
+      # 授权文件。留空时 AIRLOCK_LICENSE_FILE 也为空，control 走试用模式。
+      - ${LICENSE_HOST_PATH:-/dev/null}:/etc/airlock/license.txt:ro
+    ports:
+      - "${CONTROL_PORT}:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8081/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  airlock-edge:
+    image: airlock:${AIRLOCK_VERSION}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["edge"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      airlock-control:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      CLICKHOUSE_DSN: clickhouse://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000/${CLICKHOUSE_DB}
+      AIRLOCK_ENCRYPTION_KEY: ${AIRLOCK_ENCRYPTION_KEY}
+      EDGE_LISTEN_ADDR: ":8080"
+      EDGE_UPSTREAM_BASE_URL: http://litellm:4000
+    ports:
+      - "${EDGE_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  pgdata:
+  chdata:

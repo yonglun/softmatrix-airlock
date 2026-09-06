@@ -11,12 +11,20 @@ import (
 	"github.com/softmatrix/airlock/internal/app"
 )
 
+// version 由构建时的 ldflags 注入：
+//
+//	go build -ldflags "-X main.version=v1.0.0"
+//
+// 未注入时保持 "dev"。
+var version = "dev"
+
 const usage = `airlock —— 企业 AI 网关
 
 用法：
   airlock edge      启动数据面（ak- 鉴权、转发、计费）
   airlock control   启动管理面（OIDC 登录、组织树、成员）
   airlock migrate   执行数据库迁移后退出
+  airlock version   打印版本号后退出
 `
 
 func main() {
@@ -24,6 +32,9 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+
+	// 交给 app 层，让两个进程的启动日志都带上版本。
+	app.Version = version
 
 	var err error
 	switch os.Args[1] {
@@ -33,6 +44,9 @@ func main() {
 		err = app.RunControl()
 	case "migrate":
 		err = app.RunMigrate()
+	case "version":
+		fmt.Println(version)
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "未知子命令 %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
