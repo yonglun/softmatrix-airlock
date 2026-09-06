@@ -30,16 +30,16 @@ var (
 
 // parseRange 解析 from/to 参数。两者都缺省时取最近 defaultRangeDays 天。
 //
-// 接受两种写法：RFC3339（带时区的精确时刻）与 YYYY-MM-DD（当天零点 UTC）。
-// 后者是人在 URL 里手写时的自然形式，不支持它会逼着用户去查时区偏移。
+// 接受两种写法：RFC3339（带时区的精确时刻）与 YYYY-MM-DD（人在 URL 里
+// 手写时的自然形式，不支持它会逼着用户去查时区偏移）。
 func parseRange(q url.Values) (from, to time.Time, err error) {
 	now := time.Now().UTC()
 
-	to, err = parseOneTime(q.Get("to"), now)
+	to, err = parseRangeEnd(q.Get("to"), now)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
-	from, err = parseOneTime(q.Get("from"), to.AddDate(0, 0, -defaultRangeDays))
+	from, err = parseRangeStart(q.Get("from"), to.AddDate(0, 0, -defaultRangeDays))
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
@@ -53,7 +53,9 @@ func parseRange(q url.Values) (from, to time.Time, err error) {
 	return from, to, nil
 }
 
-func parseOneTime(raw string, fallback time.Time) (time.Time, error) {
+// parseRangeStart 解析起始时间。裸日期解析成当天零点 UTC——
+// 「从 9 月 1 日起」，起点就该是那一天的开始。
+func parseRangeStart(raw string, fallback time.Time) (time.Time, error) {
 	if raw == "" {
 		return fallback, nil
 	}
@@ -62,6 +64,25 @@ func parseOneTime(raw string, fallback time.Time) (time.Time, error) {
 	}
 	if t, err := time.Parse("2006-01-02", raw); err == nil {
 		return t.UTC(), nil
+	}
+	return time.Time{}, errRangeInvalid
+}
+
+// parseRangeEnd 解析结束时间。裸日期解析成**次日**零点 UTC，而不是当天零点。
+//
+// 查询用的是 ts < to 排他上界；若 to 解析成当天零点，「到 9 月 6 日」会把
+// 9 月 6 日一整天的数据全部排除——这与用户在日期选择器里选到今天、
+// 却看不到今天任何记录的直觉完全相反。次日零点才让排他上界真正
+// 覆盖到选定的那一天结束。
+func parseRangeEnd(raw string, fallback time.Time) (time.Time, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.UTC().AddDate(0, 0, 1), nil
 	}
 	return time.Time{}, errRangeInvalid
 }

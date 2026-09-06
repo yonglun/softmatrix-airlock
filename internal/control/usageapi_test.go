@@ -31,7 +31,8 @@ func TestParseRangeAcceptsExplicitDates(t *testing.T) {
 	require.Equal(t, 2026, from.Year())
 	require.Equal(t, time.September, from.Month())
 	require.Equal(t, 1, from.Day())
-	require.Equal(t, 8, to.Day())
+	// to 是裸日期时解析成次日零点，让 ts < to 的排他上界覆盖 9/8 这一整天。
+	require.Equal(t, 9, to.Day())
 }
 
 func TestParseRangeRejectsTooLongSpan(t *testing.T) {
@@ -52,6 +53,21 @@ func TestParseRangeRejectsInvertedRange(t *testing.T) {
 func TestParseRangeRejectsUnparsableDate(t *testing.T) {
 	_, _, err := parseRange(url.Values{"from": {"上周"}})
 	require.ErrorIs(t, err, errRangeInvalid)
+}
+
+func TestParseRangeToDateIsInclusiveOfWholeDay(t *testing.T) {
+	// 真实缺陷：查询用的是 ts < to 排他上界。若裸日期的 to 解析成
+	// 「当天零点」，选择「到 9 月 6 日」会把 9 月 6 日一整天的数据
+	// 全部排除——这正是审计检索页默认范围下看不到当天记录的原因。
+	// to 必须解析成次日零点，让排他上界覆盖到那一天结束。
+	_, to, err := parseRange(url.Values{
+		"from": {"2026-09-01"}, "to": {"2026-09-06"},
+	})
+	require.NoError(t, err)
+
+	recordedAtEndOfDay := time.Date(2026, 9, 6, 23, 59, 59, 0, time.UTC)
+	require.True(t, recordedAtEndOfDay.Before(to),
+		"9 月 6 日当天最后一刻的记录必须落在 [from, to) 范围内")
 }
 
 // fakeUsageReader 回放预置的聚合结果，并记下收到的查询条件——
