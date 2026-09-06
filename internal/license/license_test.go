@@ -109,3 +109,66 @@ func TestVerifyRejectsMalformedInput(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyRejectsUnsupportedVersion(t *testing.T) {
+	p := validPayload()
+	p.V = 2
+	pub, raw := mint(t, p)
+
+	_, err := VerifyWith(pub, raw, time.Now())
+	require.ErrorIs(t, err, ErrUnsupportedVersion)
+	require.Contains(t, err.Error(), "请升级 Airlock")
+}
+
+func TestVerifyRejectsInvalidPayload(t *testing.T) {
+	cases := map[string]func(*Payload){
+		"席位为零":            func(p *Payload) { p.Seats = 0 },
+		"席位为负":            func(p *Payload) { p.Seats = -1 },
+		"客户名为空":           func(p *Payload) { p.Customer = "" },
+		"没有 license_id": func(p *Payload) { p.LicenseID = "" },
+		"没有到期时间":          func(p *Payload) { p.ExpiresAt = time.Time{} },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := validPayload()
+			mutate(&p)
+			pub, raw := mint(t, p)
+
+			_, err := VerifyWith(pub, raw, time.Now())
+			require.ErrorIs(t, err, ErrInvalidPayload)
+		})
+	}
+}
+
+// ExpiresAt 是排他上界。签发工具把 "-expires 2027-09-06" 签成
+// 09-07T00:00:00Z，于是 9 月 6 日 23:59:59 仍然有效、9 月 7 日零点整过期。
+// 这与 P1.5a 的 parseRangeEnd 是同一个决策（那次真踩过：裸日期解析成
+// 当天零点，把「到 9 月 6 日」整天的数据全排除了）。
+func TestVerifyExpiryBoundaryIsExclusive(t *testing.T) {
+	p := validPayload() // ExpiresAt = 2027-09-07T00:00:00Z
+	pub, raw := mint(t, p)
+
+	justBefore := p.ExpiresAt.Add(-time.Nanosecond)
+	lic, err := VerifyWith(pub, raw, justBefore)
+	require.NoError(t, err)
+	require.Equal(t, StatusValid, lic.Status, "到期时刻前一纳秒应仍然有效")
+
+	atExpiry, err := VerifyWith(pub, raw, p.ExpiresAt)
+	require.NoError(t, err)
+	require.Equal(t, StatusExpired, atExpiry.Status, "到期时刻整点应已过期")
+}
+
+// 过期的 license 仍然要能读出客户名与席位数——
+// 控制台的红条要显示「授权已于 X 到期」，读不出来就没法提示。
+func TestExpiredLicenseStillCarriesItsFields(t *testing.T) {
+	p := validPayload()
+	pub, raw := mint(t, p)
+
+	lic, err := VerifyWith(pub, raw, p.ExpiresAt.AddDate(0, 0, 3))
+
+	require.NoError(t, err)
+	require.Equal(t, StatusExpired, lic.Status)
+	require.Equal(t, "某某银行", lic.Customer)
+	require.Equal(t, 200, lic.Seats)
+	require.Equal(t, p.ExpiresAt, lic.ExpiresAt)
+}
