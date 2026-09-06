@@ -106,3 +106,29 @@ export type EffectiveGrant = {
   source_org_id: string | null
   created_at: string
 }
+
+/** GET /api/usage/summary —— snake_case（视图类型有 json tag） */
+export type UsageSummaryRow = {
+  key: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cost_micro: number
+}
+
+/** GET /api/audit/records —— snake_case */
+export type AuditRecord = {
+  ts: string
+  request_id: string
+  org_id: string
+  user_id: string
+  key_id: string
+  model: string
+  status_code: number
+  latency_ms: number
+  ttft_ms: number
+  input_tokens: number
+  output_tokens: number
+  cost_micro: number
+  error_type: string
+}
