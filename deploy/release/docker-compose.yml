@@ -89,6 +89,13 @@ services:
       origin: ${CASDOOR_ORIGIN}
     ports:
       - "${CASDOOR_PORT}:8000"
+    healthcheck:
+      # 探的是 airlock-control 实际要用的那个端点——OIDC discovery。
+      # 这个响应就绪，就意味着 control 起来后重试也一定能成功。
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/.well-known/openid-configuration"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   airlock-control:
     image: airlock:${AIRLOCK_VERSION}
@@ -99,6 +106,12 @@ services:
       postgres:
         condition: service_healthy
       clickhouse:
+        condition: service_healthy
+      # control 启动时会立刻发起一次 OIDC discovery，失败就直接退出
+      # （见 internal/control/oidc.go）——它不会自己重试。不等 casdoor
+      # 就绪就起 control 是一个真实存在的竞态：Casdoor 自己还要跑一遍
+      # Postgres 迁移，起得比 control 慢是常态，不是偶发。
+      casdoor:
         condition: service_healthy
     environment:
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable

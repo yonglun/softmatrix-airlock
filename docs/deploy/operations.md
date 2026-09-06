@@ -177,6 +177,7 @@ docker compose restart airlock-control
 | control 启动失败：`授权文件校验失败` | license 文件损坏或被改过 | 向供应方索取完好的 license；不要手工编辑该文件 |
 | control 启动失败：`未配置 AIRLOCK_ENCRYPTION_KEY` | `.env` 里该项为空 | 由 `install.sh` 自动生成；若手工清空过，**不能随便重新生成**——换密钥会导致已签发密钥无法解密 |
 | control 启动失败：无管理员且 bootstrap 为空 | `AIRLOCK_BOOTSTRAP_ADMIN` 没填 | 在 `.env` 里填首个管理员的 email，重启 control |
+| control 启动失败：`OIDC discovery 失败 ... connect: connection refused` | `OIDC_ISSUER` 被改成了 `localhost` 或浏览器地址 | 改回 `http://casdoor:8000`（compose 内部服务名）；这一项与 `CASDOOR_ORIGIN` 不是同一回事，见部署文档 §3 |
 | 登录时报 `x509: certificate signed by unknown authority` | 客户 IdP 用内部 CA 签的证书 | 把 CA 证书挂进 airlock-control 容器的 `/etc/ssl/certs/` 并重启 |
 | 登录后跳回登录页 / 回调失败 | `OIDC_REDIRECT_URL` 与浏览器实际访问的地址不一致 | 两者必须完全一致，含协议、主机名与端口 |
 | 控制台能开但数据面调用报上游 401 | 供应商密钥未配或无效 | 检查 `.env` 里的 `DEEPSEEK_API_KEY` 等，改完 `docker compose restart litellm` |

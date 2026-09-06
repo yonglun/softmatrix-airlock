@@ -153,9 +153,13 @@ step_config() {
 
     # 必填项检查。这些填不上，装完也用不了。
     local missing=()
-    grep -q '^AIRLOCK_BOOTSTRAP_ADMIN=.\+' .env || missing+=("AIRLOCK_BOOTSTRAP_ADMIN（首个平台管理员的 email）")
-    grep -q '^OIDC_CLIENT_SECRET=.\+'      .env || missing+=("OIDC_CLIENT_SECRET（Casdoor 里 airlock 应用的密钥）")
-    if ! grep -qE '^(DEEPSEEK|DASHSCOPE|OPENAI)_API_KEY=.\+' .env; then
+    # 统一用 -E（ERE）+ 不转义的 +。混用 BRE 的 \+（GNU 扩展，表示「一个或多个」）
+    # 和 ERE 的 \+（标准语义是「字面量加号」）曾经在这里出过真 bug：ERE 模式下
+    # 的 .\+ 只会匹配「任意字符后跟一个字面加号」，像 sk-abc123 这种正常取值
+    # 完全匹配不上，会被误判成「没填」。
+    grep -qE '^AIRLOCK_BOOTSTRAP_ADMIN=.+' .env || missing+=("AIRLOCK_BOOTSTRAP_ADMIN（首个平台管理员的 email）")
+    grep -qE '^OIDC_CLIENT_SECRET=.+'      .env || missing+=("OIDC_CLIENT_SECRET（Casdoor 里 airlock 应用的密钥）")
+    if ! grep -qE '^(DEEPSEEK|DASHSCOPE|OPENAI)_API_KEY=.+' .env; then
         missing+=("至少一个模型供应商密钥（DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / OPENAI_API_KEY）")
     fi
 
