@@ -34,6 +34,9 @@ lint:
 	@echo "检查 usage 包的独立性..."
 	@! go list -deps ./internal/usage/... 2>/dev/null | grep -qE 'airlock/internal/(control|edge)' \
 		|| { echo "违规：internal/usage 依赖了 internal/control 或 internal/edge"; exit 1; }
+	@echo "检查 license 包的独立性..."
+	@! go list -deps ./internal/license/... 2>/dev/null | grep -qE 'airlock/internal/(control|edge)' \
+		|| { echo "违规：internal/license 依赖了 internal/control 或 internal/edge"; exit 1; }
 	@echo "包边界检查通过"
 
 up:
