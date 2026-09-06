@@ -255,8 +255,9 @@ func (s *postgresOrgStore) Move(ctx context.Context, id string, newParentID *str
 // 调用方无法区分「服务器故障」和「合法的删除冲突」。
 //
 // 为什么只查 api_keys 而不查 ClickHouse 的用量记录：用量记录一定挂在某把
-// Key 上，而 Key 只会被吊销、永不物理删除——所以「有用量记录」必然蕴含
-// 「有 Key」。查 api_keys 已经覆盖，控制面因此完全不需要 ClickHouse 连接。
+// 密钥上，而密钥一定挂在节点上，因此「有用量」蕴含「有 Key」。查 api_keys
+// 已经覆盖，这条判断因此不需要 ClickHouse——即便 P1.5a 起控制面已经为了
+// 报表接了 ClickHouse，删除前的占用检查也没有理由多绕一层。
 func (s *postgresOrgStore) Delete(ctx context.Context, id string) error {
 	if _, err := s.Get(ctx, id); err != nil {
 		return err
