@@ -183,6 +183,20 @@ func TestOrgStoreExternalIDIsUniquePerSource(t *testing.T) {
 	require.Error(t, err, "同一来源下 external_id 必须唯一，这是导入幂等的基础")
 }
 
+// 回归测试：全新装机、组织树一个节点都没有时，All 绝不能返回 nil 切片。
+// nil 切片编码成 JSON 是 null，GET /api/orgs 把它原样返回给前端后，
+// OrgTree 组件对 null 调用 .map() 直接白屏崩溃——这是生产环境实际发生过的故障。
+func TestOrgStoreAllReturnsEmptySliceNotNilWhenNoRows(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresOrgStore(db)
+
+	all, err := s.All(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, all, "空表必须返回 []，而不是 nil（会被编码成 JSON null）")
+	require.Empty(t, all)
+}
+
 func TestOrgStoreManualNodesIgnoreExternalUnique(t *testing.T) {
 	db := testDB(t)
 	cleanTables(t, db)

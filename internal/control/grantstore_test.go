@@ -116,6 +116,45 @@ func TestCreateAndListGrants(t *testing.T) {
 	require.Equal(t, "rd", *got[0].OrgID)
 }
 
+// 回归测试：某节点一条授予都没有时，ListGrantsForOrg 绝不能返回 nil 切片——
+// GET /api/orgs/{id}/grants 把它原样序列化给前端，nil 编码成 JSON null
+// 会让角色与权限页对 null 调用 .map() 崩溃（生产环境实际发生过）。
+func TestListGrantsForOrgReturnsEmptySliceNotNilWhenNoGrants(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresRBACStore(db)
+	ctx := context.Background()
+	require.NoError(t, s.SyncBuiltinRoles(ctx))
+
+	orgs := NewPostgresOrgStore(db)
+	require.NoError(t, orgs.Create(ctx, &Org{ID: "rd", Name: "研发中心"}))
+
+	got, err := s.ListGrantsForOrg(ctx, "rd")
+	require.NoError(t, err)
+	require.NotNil(t, got, "无授予必须返回 []，而不是 nil（会被编码成 JSON null）")
+	require.Empty(t, got)
+}
+
+// 回归测试：角色表为空时，ListRoles 绝不能返回 nil 切片——理由同上，
+// 对应 GET /api/roles。正常部署会先跑 SyncBuiltinRoles 填好内置角色，
+// 这里刻意跳过它，直接对空表验证这条不变式。
+func TestListRolesReturnsEmptySliceNotNilWhenNoRows(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	// cleanTables 不清 roles/role_permissions——同一个测试数据库里跑过的
+	// 其它用例可能已经 SyncBuiltinRoles 过，这里显式清空才能保证真的是空表。
+	_, err := db.Exec(`DELETE FROM role_permissions`)
+	require.NoError(t, err)
+	_, err = db.Exec(`DELETE FROM roles`)
+	require.NoError(t, err)
+	s := NewPostgresRBACStore(db)
+
+	got, err := s.ListRoles(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, got, "空表必须返回 []，而不是 nil（会被编码成 JSON null）")
+	require.Empty(t, got)
+}
+
 func TestCreateGrantRejectsDuplicateGlobalGrant(t *testing.T) {
 	// Postgres 认为 NULL 彼此不相等，普通唯一索引挡不住重复的全局授予。
 	// 迁移里用了 COALESCE(org_id,'') 表达式索引，这里验证它真的生效。

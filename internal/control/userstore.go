@@ -98,7 +98,9 @@ func (s *postgresUserStore) ListActive(ctx context.Context) ([]*User, error) {
 	}
 	defer rows.Close()
 
-	var out []*User
+	// make 而不是 var：GET /api/users 直接把这个返回值序列化给前端，
+	// 空结果集必须是 JSON []，null 会让前端的 .map() 崩溃。
+	out := make([]*User, 0)
 	for rows.Next() {
 		u, err := scanUser(rows)
 		if err != nil {

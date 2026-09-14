@@ -33,6 +33,20 @@ func TestUserStoreUpsertInsertsThenUpdates(t *testing.T) {
 	require.Equal(t, "甲改名", updated.DisplayName)
 }
 
+// 回归测试：一个活跃用户都没有时，ListActive 绝不能返回 nil 切片——
+// GET /api/users 把它原样序列化给前端，nil 编码成 JSON null 会让
+// 依赖用户列表渲染的页面对 null 调用 .map() 崩溃。
+func TestUserStoreListActiveReturnsEmptySliceNotNilWhenNoRows(t *testing.T) {
+	db := testDB(t)
+	cleanTables(t, db)
+	s := NewPostgresUserStore(db)
+
+	active, err := s.ListActive(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, active, "空表必须返回 []，而不是 nil（会被编码成 JSON null）")
+	require.Empty(t, active)
+}
+
 func TestUserStoreByExternalID(t *testing.T) {
 	db := testDB(t)
 	cleanTables(t, db)
