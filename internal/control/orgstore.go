@@ -175,7 +175,9 @@ func (s *postgresOrgStore) All(ctx context.Context) ([]*Org, error) {
 }
 
 func collectOrgs(rows *sql.Rows) ([]*Org, error) {
-	var out []*Org
+	// make 而不是 var：空结果集要编码成 JSON []，不能是 null——
+	// 否则前端 GET /api/orgs 拿到 null 时对它 .map() 直接崩溃。
+	out := make([]*Org, 0)
 	for rows.Next() {
 		o, err := scanOrg(rows)
 		if err != nil {

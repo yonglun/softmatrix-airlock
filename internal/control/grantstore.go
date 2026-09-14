@@ -107,7 +107,9 @@ func (s *postgresRBACStore) ListRoles(ctx context.Context) ([]Role, error) {
 	}
 	defer rows.Close()
 
-	var out []Role
+	// make 而不是 var：GET /api/roles 直接把这个返回值序列化给前端，
+	// 空结果集必须是 JSON []，null 会让前端的 .map() 崩溃。
+	out := make([]Role, 0)
 	for rows.Next() {
 		var r Role
 		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &r.IsBuiltin); err != nil {
@@ -161,7 +163,9 @@ func (s *postgresRBACStore) DeleteGrant(ctx context.Context, id string) error {
 const grantColumns = `id, user_id, role_id, org_id, granted_by, created_at`
 
 func scanGrants(rows *sql.Rows) ([]RoleGrant, error) {
-	var out []RoleGrant
+	// make 而不是 var：ListGrantsForOrg 的结果被 GET /api/orgs/{id}/grants
+	// 直接序列化给前端，空结果集必须是 JSON []，null 会让 .map() 崩溃。
+	out := make([]RoleGrant, 0)
 	for rows.Next() {
 		var g RoleGrant
 		if err := rows.Scan(&g.ID, &g.UserID, &g.RoleID, &g.OrgID,
